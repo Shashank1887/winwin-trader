@@ -1,0 +1,11 @@
+.env
+.cache/
+logs/
+trades_log.csv
+__pycache__/
+*.pyc
+.pytest_cache/
+.streamlit/secrets.toml
+mobile/node_modules/
+mobile/.expo/
+mobile/dist/

@@ -76,9 +76,12 @@ def init_session_state() -> None:
     st.session_state.setdefault("autopilot_last_scan_ep", 0.0)
     st.session_state.setdefault("capital", 50000.0)
     st.session_state.setdefault("max_sl_per_trade", MAX_SL_PER_TRADE)
-    st.session_state.setdefault("max_trades_per_day", MAX_TRADES_PER_DAY)
+    st.session_state.setdefault("enable_max_trades_limit", False)
+    st.session_state.setdefault("max_trades_per_day", 5)
     st.session_state.setdefault("window_preset", "morning")
-    st.session_state.setdefault("universe_preset", "top15")
+    st.session_state.setdefault("universe_preset", "nifty50")
+    st.session_state.setdefault("last_scan_candles", {})
+    st.session_state.setdefault("backtest_result", None)
     st.session_state.setdefault("custom_symbols", "RELIANCE, TCS, TRENT, BEL, HAL")
     st.session_state.setdefault("trailing_sl_enabled", True)
     st.session_state.setdefault("nifty_trend_filter", True)
@@ -140,14 +143,23 @@ def render_sidebar() -> RiskConfig:
             key="max_sl_per_trade",
             help=f"Hardcoded ceiling: ₹{MAX_SL_PER_TRADE:,.0f} per trade",
         )
-        max_trades = st.number_input(
-            "Max trades per day",
-            min_value=1,
-            max_value=MAX_TRADES_PER_DAY,
-            step=1,
-            key="max_trades_per_day",
-            help=f"Hardcoded ceiling: {MAX_TRADES_PER_DAY} trades/day",
+        limit_trades = st.toggle(
+            "Limit max trades per day (optional)",
+            key="enable_max_trades_limit",
+            help="Off = unlimited trades (still protected by Daily Target +₹1,000 & Kill-Switch -₹800).",
         )
+        if limit_trades:
+            max_trades = int(
+                st.number_input(
+                    "Max trades per day",
+                    min_value=1,
+                    max_value=50,
+                    step=1,
+                    key="max_trades_per_day",
+                )
+            )
+        else:
+            max_trades = 0
         window_preset: WindowPreset = st.selectbox(
             "Active trading window",
             options=["morning", "split", "full"],
@@ -156,10 +168,10 @@ def render_sidebar() -> RiskConfig:
         )
         universe_preset: UniversePreset = st.selectbox(
             "Stock screener universe",
-            options=["top15", "nifty50", "custom"],
+            options=["nifty50", "top15", "custom"],
             format_func=lambda k: {
-                "top15": "Top 15 Liquid Nifty 50 (~8s)",
-                "nifty50": "Full Nifty 50 — 50 Stocks (~22s)",
+                "nifty50": "Full Nifty 50 — All 50 Stocks (0.35s batch)",
+                "top15": "Top 15 Liquid Nifty 50 (~6s)",
                 "custom": "Custom NSE Watchlist",
             }[k],
             key="universe_preset",
@@ -180,7 +192,7 @@ def render_sidebar() -> RiskConfig:
         st.toggle(
             "NIFTY 50 Index Trend Filter",
             key="nifty_trend_filter",
-            help="Blocks new Equity BUY trades when NIFTY 50 Spot is BEARISH.",
+            help="Blocks counter-trend Equity trades (BUY when NIFTY BEARISH, SELL when BULLISH).",
         )
         st.toggle(
             "Show F&O Trading Page (Optional)",
@@ -193,7 +205,7 @@ def render_sidebar() -> RiskConfig:
                 "Daily Target": f"+₹{DAILY_PROFIT_TARGET:,.0f} (Net Auto-Lock)",
                 "Daily Kill-Switch": f"-₹{DAILY_MAX_LOSS:,.0f} (Hard Stop)",
                 "Max SL / Trade": f"₹{MAX_SL_PER_TRADE:,.0f}",
-                "Max Trades / Day": f"{MAX_TRADES_PER_DAY}",
+                "Max Trades / Day": f"{max_trades}" if max_trades > 0 else "Unlimited (Optional)",
                 "Selected Window": get_window_label(window_preset),
             },
             border="horizontal",

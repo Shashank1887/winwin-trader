@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 import requests
 from dotenv import dotenv_values, set_key
+
+
+def sanitize_bot_token(raw_token: str) -> str:
+    """Normalize a Telegram BotFather token (strip quotes, whitespace, and accidental 'bot' prefix)."""
+    token = str(raw_token or "").strip().strip('"').strip("'")
+    if re.match(r"^bot\d+:", token, flags=re.IGNORECASE):
+        token = token[3:]
+    return token.strip()
 
 
 @dataclass
@@ -27,7 +36,7 @@ def load_telegram_config(env_path: str | Path = ".env") -> TelegramConfig:
     """Load Telegram Bot credentials from .env or environment variables."""
     path = Path(env_path)
     vals = dotenv_values(path) if path.exists() else {}
-    token = str(vals.get("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")).strip()
+    token = sanitize_bot_token(str(vals.get("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")))
     chat_id = str(vals.get("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT_ID", "")).strip()
     enabled_raw = str(vals.get("TELEGRAM_ENABLED") or os.getenv("TELEGRAM_ENABLED", "true")).strip().lower()
     enabled = enabled_raw not in {"0", "false", "no", "off"}
@@ -39,7 +48,7 @@ def save_telegram_config(cfg: TelegramConfig, env_path: str | Path = ".env") -> 
     path = Path(env_path)
     if not path.exists():
         path.write_text("", encoding="utf-8")
-    set_key(str(path), "TELEGRAM_BOT_TOKEN", cfg.bot_token.strip())
+    set_key(str(path), "TELEGRAM_BOT_TOKEN", sanitize_bot_token(cfg.bot_token))
     set_key(str(path), "TELEGRAM_CHAT_ID", cfg.chat_id.strip())
     set_key(str(path), "TELEGRAM_ENABLED", "true" if cfg.enabled else "false")
 
@@ -53,20 +62,34 @@ def send_telegram_message(
     config = cfg or load_telegram_config()
     if not config.enabled:
         return False, "Telegram alerts are disabled."
-    if not config.bot_token.strip() or not config.chat_id.strip():
+    token = sanitize_bot_token(config.bot_token)
+    chat_id = config.chat_id.strip()
+    if not token or not chat_id:
         return False, "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required."
+    if ":" not in token:
+        return False, "Invalid Bot Token format (expected `<id>:<secret>` from @BotFather)."
 
-    url = f"https://api.telegram.org/bot{config.bot_token.strip()}/sendMessage"
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
         resp = requests.post(
             url,
-            json={"chat_id": config.chat_id.strip(), "text": message},
+            json={"chat_id": chat_id, "text": message},
             timeout=timeout,
         )
         data = resp.json() if resp.content else {}
         if resp.status_code == 200 and data.get("ok"):
             return True, "Telegram alert sent."
-        desc = data.get("description") or f"HTTP {resp.status_code}"
+        desc = str(data.get("description") or f"HTTP {resp.status_code}")
+        if resp.status_code == 404 or "not found" in desc.lower():
+            return (
+                False,
+                "Telegram API error (404 Not Found): Check Bot Token from @BotFather (ensure no placeholder text or 'bot' prefix).",
+            )
+        if "chat not found" in desc.lower():
+            return (
+                False,
+                "Telegram API error (chat not found): Open your bot in Telegram, press Start (/start), and check Chat ID.",
+            )
         return False, f"Telegram API error: {desc}"
     except Exception as exc:
         return False, f"Telegram request failed: {exc}"

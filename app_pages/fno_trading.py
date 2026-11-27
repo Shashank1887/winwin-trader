@@ -19,7 +19,7 @@ from risk_manager import (
     now_ist,
     round_to_tick,
 )
-from strategy import evaluate_index_trend
+from strategy import NIFTY50_ALL_SYMBOLS, evaluate_index_trend
 from trading_actions import execute_panic_square_off
 
 base_cfg: RiskConfig = st.session_state.active_risk_cfg
@@ -62,7 +62,7 @@ fno_cfg = FnoRiskConfig(
     sl_points=float(st.session_state.fno_sl_points),
     daily_profit_target=FNO_DAILY_PROFIT_TARGET,
     daily_max_loss=FNO_DAILY_MAX_LOSS,
-    max_trades_per_day=2,
+    max_trades_per_day=base_cfg.max_trades_per_day,
     window_preset=base_cfg.window_preset,
 )
 
@@ -122,7 +122,9 @@ elif fno_summary["realized_pnl"] >= fno_cfg.daily_profit_target:
     fno_can_trade = False
 else:
     fno_status = "ACTIVE"
-    fno_can_trade = fno_snap.within_active_window and fno_summary["trades_used"] < fno_cfg.max_trades_per_day
+    fno_can_trade = fno_snap.within_active_window and (
+        fno_cfg.max_trades_per_day == 0 or fno_summary["trades_used"] < fno_cfg.max_trades_per_day
+    )
 
 if not broker.is_connected:
     st.info(
@@ -153,10 +155,16 @@ m2.metric(
     border=True,
     icon=":material/flag:",
 )
+fno_trades_label = (
+    f"{fno_summary['trades_used']} / {fno_cfg.max_trades_per_day}"
+    if fno_cfg.max_trades_per_day > 0
+    else f"{fno_summary['trades_used']}"
+)
 m3.metric(
     "F&O Trades Used",
-    f"{fno_summary['trades_used']} / {fno_cfg.max_trades_per_day}",
-    delta=f"{fno_summary['open_positions_count']} open",
+    fno_trades_label,
+    delta=f"{fno_summary['open_positions_count']} open"
+    + ("" if fno_cfg.max_trades_per_day > 0 else " (Unlimited)"),
     delta_color="off",
     border=True,
     icon=":material/swap_horiz:",
@@ -174,16 +182,29 @@ st.space("small")
 
 with st.container(border=True):
     st.subheader("F&O Spot Signal & Contract Selector", anchor=False)
-    st.caption("Option Buying (CE/PE) and 1-Lot Index Futures only — naked Option Selling is blocked for capital safety.")
+    st.caption("Manual Index & Stock Option Buying (CE/PE) and 1-Lot Futures only — naked Option Selling is blocked for capital safety.")
+
+    index_symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+    all_underlyings = index_symbols + [s for s in NIFTY50_ALL_SYMBOLS if s not in index_symbols]
 
     fc1, fc2, fc3, fc4 = st.columns(4)
     with fc1:
-        underlying = st.selectbox("Index", ["NIFTY", "BANKNIFTY", "FINNIFTY"], key="fno_underlying")
+        underlying = st.selectbox("Index / Stock", all_underlyings, key="fno_underlying")
+    is_index = underlying in index_symbols
+    seg_options = ["OPTIDX", "FUTIDX"] if is_index else ["OPTSTK", "FUTSTK"]
+    if st.session_state.get("fno_instrument") not in seg_options:
+        st.session_state.fno_instrument = seg_options[0]
+
     with fc2:
         instrument = st.selectbox(
             "Segment",
-            ["OPTIDX", "FUTIDX"],
-            format_func=lambda x: "Options (CE / PE Buy)" if x == "OPTIDX" else "Index Futures (Buy)",
+            seg_options,
+            format_func=lambda x: {
+                "OPTIDX": "Index Options (CE / PE Buy)",
+                "FUTIDX": "Index Futures (Buy)",
+                "OPTSTK": "Stock Options (CE / PE Buy)",
+                "FUTSTK": "Stock Futures (Buy)",
+            }[x],
             key="fno_instrument",
         )
     with fc3:
@@ -191,12 +212,29 @@ with st.container(border=True):
     with fc4:
         sl_pts = st.number_input("Stop-Loss (points)", min_value=5.0, max_value=50.0, step=2.5, key="fno_sl_points")
 
+    opt_choice = "AUTO"
+    if instrument.startswith("OPT"):
+        opt_choice = st.segmented_control(
+            "Option type",
+            options=["AUTO", "CE", "PE"],
+            default="AUTO",
+            format_func=lambda x: {
+                "AUTO": "Auto (Spot Trend)",
+                "CE": "CE (Call Buy)",
+                "PE": "PE (Put Buy)",
+            }[x],
+            key="fno_option_side",
+        ) or "AUTO"
+
     if st.button("Analyze Spot & Load Nearest Contracts", icon=":material/radar:", key="fno_scan_btn"):
         try:
-            spot_df, _ = broker.fetch_index_spot_candles(underlying, use_smartapi=(fno_mode == "LIVE"), days_back=5)
+            spot_df, _ = broker.fetch_fno_underlying_candles(underlying, use_smartapi=(fno_mode == "LIVE"), days_back=5)
             trend = evaluate_index_trend(spot_df, index_name=underlying)
             st.session_state.fno_spot_trend = trend
-            opt_side = "PE" if trend.regime == "BEARISH" else "CE"
+            if opt_choice in ("CE", "PE"):
+                opt_side = opt_choice
+            else:
+                opt_side = "PE" if trend.regime == "BEARISH" else "CE"
             contracts = broker.get_fno_contracts(
                 underlying=underlying,
                 instrument_type=instrument,
@@ -242,7 +280,7 @@ with st.container(border=True):
             )
         sl_px = round_to_tick(max(0.05, entry_px - float(sl_pts)))
         tgt_px = round_to_tick(entry_px + 2.0 * float(sl_pts))
-        seg_type: SegmentType = "NFO_OPTIONS" if instrument == "OPTIDX" else "NFO_FUTURES"
+        seg_type: SegmentType = "NFO_OPTIONS" if instrument.startswith("OPT") else "NFO_FUTURES"
         est_chg = calculate_nse_charges(seg_type, entry_px * qty, tgt_px * qty)["total"]
         with col_r:
             st.metric(

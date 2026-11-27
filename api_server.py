@@ -31,6 +31,13 @@ from broker import (
     load_credentials,
     save_credentials,
 )
+from notifier import (
+    TelegramConfig,
+    load_telegram_config,
+    notify_async,
+    save_telegram_config,
+    send_telegram_message,
+)
 from risk_manager import (
     DAILY_MAX_LOSS,
     DAILY_PROFIT_TARGET,
@@ -44,6 +51,7 @@ from risk_manager import (
     SegmentType,
     WindowPreset,
     calculate_nse_charges,
+    calculate_signed_pnl,
     can_execute_trade,
     evaluate_risk_state,
     get_window_end_time,
@@ -97,7 +105,7 @@ class AutomationSettings:
     max_sl: float = MAX_SL_PER_TRADE
     max_trades: int = MAX_TRADES_PER_DAY
     window_preset: WindowPreset = "morning"
-    universe_preset: UniversePreset = "top15"
+    universe_preset: UniversePreset = "nifty50"
     custom_symbols: str = ""
     trailing_sl_enabled: bool = True
     nifty_trend_filter: bool = True
@@ -109,6 +117,8 @@ class AppRuntime:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.creds = load_credentials()
+        self.tg_config = load_telegram_config()
+        self.notified_signal_candles: set[tuple[str, str]] = set()
         self.broker = AngelOneBroker(self.creds)
         self.trade_book = TradeBookManager("trades_log.csv")
         self.evaluations: list[StockEvaluation] = []
@@ -172,19 +182,22 @@ class ConnectBrokerRequest(BaseModel):
     totp_secret: str = Field(..., min_length=1)
 
 
+class TelegramConfigRequest(BaseModel):
+    bot_token: str = ""
+    chat_id: str = ""
+    enabled: bool = True
+
+
 class RiskParams(BaseModel):
     mode: Literal["PAPER", "LIVE"] = "PAPER"
     capital: float = 50000.0
     max_sl: float = MAX_SL_PER_TRADE
     max_trades: int = MAX_TRADES_PER_DAY
     window_preset: WindowPreset = "morning"
-    universe_preset: UniversePreset = "top15"
+    universe_preset: UniversePreset = "nifty50"
     custom_symbols: str = ""
     trailing_sl_enabled: bool = True
     nifty_trend_filter: bool = True
-    window_preset: WindowPreset = "morning"
-    universe_preset: UniversePreset = "top15"
-    custom_symbols: str = ""
 
 
 class ScanRequest(RiskParams):
@@ -202,8 +215,7 @@ class PanicExitRequest(BaseModel):
     max_sl: float = MAX_SL_PER_TRADE
     max_trades: int = MAX_TRADES_PER_DAY
     window_preset: WindowPreset = "morning"
-    window_preset: WindowPreset = "morning"
-    universe_preset: UniversePreset = "top15"
+    universe_preset: UniversePreset = "nifty50"
     custom_symbols: str = ""
 
 
@@ -217,8 +229,9 @@ class AutomationConfigRequest(RiskParams):
 
 class FnoAnalyzeRequest(BaseModel):
     mode: Literal["PAPER", "LIVE"] = "PAPER"
-    underlying: Literal["NIFTY", "BANKNIFTY", "FINNIFTY"] = "NIFTY"
-    instrument_type: Literal["OPTIDX", "FUTIDX"] = "OPTIDX"
+    underlying: str = Field(default="NIFTY", min_length=1)
+    instrument_type: Literal["OPTIDX", "FUTIDX", "OPTSTK", "FUTSTK"] = "OPTIDX"
+    option_type: Literal["AUTO", "CE", "PE"] = "AUTO"
 
 
 class FnoExecuteRequest(BaseModel):
@@ -316,7 +329,9 @@ def _sync_and_snapshot_unlocked(
     )
     for ev in events:
         tail = f": ₹{ev['pnl']:+,.2f}" if ev.get("pnl") else ""
-        runtime.log_event(f"{ev['symbol']} ({ev['reason']}){tail}")
+        msg = f"{ev['symbol']} ({ev['reason']}){tail}"
+        runtime.log_event(msg)
+        notify_async(f"[WinWin] {msg}", cfg=runtime.tg_config)
 
     summary = runtime.trade_book.compute_today_summary(mode=mode, ltp_map=runtime.ltp_map, segment="EQ_INTRADAY")
     snapshot = evaluate_risk_state(
@@ -329,7 +344,9 @@ def _sync_and_snapshot_unlocked(
     if snapshot.should_auto_square_off and runtime.ltp_map:
         cnt, msgs = _square_off_all_unlocked(mode=mode, reason="KILL-SWITCH EXIT", segment="EQ_INTRADAY")
         if cnt > 0:
-            runtime.log_event("Kill-switch auto square-off: " + " | ".join(msgs))
+            kill_msg = "Kill-switch auto square-off: " + " | ".join(msgs)
+            runtime.log_event(kill_msg)
+            notify_async(f"[WinWin] {kill_msg}", cfg=runtime.tg_config)
         summary = runtime.trade_book.compute_today_summary(mode=mode, ltp_map=runtime.ltp_map, segment="EQ_INTRADAY")
         snapshot = evaluate_risk_state(
             realized_pnl=summary["realized_pnl"],
@@ -349,12 +366,18 @@ def _execute_signal_unlocked(
     open_symbols: set[str],
     enforce_nifty_filter: bool | None = None,
 ) -> tuple[bool, str]:
+    side = "SELL" if (getattr(signal_eval, "side", "BUY") == "SELL" or getattr(signal_eval, "is_sell_signal", False)) else "BUY"
     use_filter = runtime.nifty_trend_filter if enforce_nifty_filter is None else enforce_nifty_filter
     if use_filter and runtime.index_trend is not None and runtime.index_trend.error is None:
-        if runtime.index_trend.regime == "BEARISH":
+        if side == "BUY" and runtime.index_trend.regime == "BEARISH":
             return (
                 False,
                 f"Blocked by NIFTY 50 Trend Filter (NIFTY {runtime.index_trend.price} is BEARISH).",
+            )
+        if side == "SELL" and runtime.index_trend.regime == "BULLISH":
+            return (
+                False,
+                f"Blocked by NIFTY 50 Trend Filter (NIFTY {runtime.index_trend.price} is BULLISH).",
             )
 
     eligible, reason = can_execute_trade(
@@ -383,16 +406,18 @@ def _execute_signal_unlocked(
             entry_price=fill_px,
             stop_loss=signal_eval.stop_loss,
             target=signal_eval.target,
-            notes="Simulated fill at live market price",
+            notes=f"Simulated {side} fill at live market price",
+            side=side,
         )
         msg = (
-            f"PAPER BUY executed: {signal_eval.qty} x {signal_eval.symbol} @ ₹{fill_px:.2f} "
+            f"PAPER {side} executed: {signal_eval.qty} x {signal_eval.symbol} @ ₹{fill_px:.2f} "
             f"(SL ₹{signal_eval.stop_loss:.2f} | Target ₹{signal_eval.target:.2f})"
         )
         runtime.log_event(msg)
+        notify_async(f"[WinWin] {msg}", cfg=runtime.tg_config)
         return True, msg
 
-    order_res = runtime.broker.place_live_buy_with_protection(
+    order_res = runtime.broker.place_live_order_with_protection(
         symbol=signal_eval.symbol,
         tradingsymbol=signal_eval.tradingsymbol,
         token=signal_eval.token,
@@ -400,6 +425,7 @@ def _execute_signal_unlocked(
         entry_price_hint=signal_eval.price,
         stop_loss=signal_eval.stop_loss,
         target=signal_eval.target,
+        side=side,
     )
     runtime.trade_book.record_entry(
         mode="LIVE",
@@ -414,12 +440,14 @@ def _execute_signal_unlocked(
         sl_order_id=order_res["sl_order_id"],
         target_order_id=order_res["target_order_id"],
         notes=order_res["notes"],
+        side=side,
     )
     msg = (
-        f"LIVE BUY placed: {signal_eval.qty} x {signal_eval.tradingsymbol} @ ₹{order_res['fill_price']:.2f} "
+        f"LIVE {side} placed: {signal_eval.qty} x {signal_eval.tradingsymbol} @ ₹{order_res['fill_price']:.2f} "
         f"(Order ID: {order_res['entry_order_id']})"
     )
     runtime.log_event(msg)
+    notify_async(f"[WinWin] {msg}", cfg=runtime.tg_config)
     return True, msg
 
 
@@ -434,10 +462,10 @@ def _fetch_index_trend_safe(mode: Literal["PAPER", "LIVE"], index_name: str = "N
 def _perform_network_scan(
     mode: Literal["PAPER", "LIVE"],
     risk_cfg: RiskConfig,
-    universe_preset: UniversePreset = "top15",
+    universe_preset: UniversePreset = "nifty50",
     custom_symbols: str = "",
 ) -> tuple[list[StockEvaluation], dict[str, float], set[str], str | None]:
-    """Fetch 5-minute candles & batch LTPs without holding runtime.lock."""
+    """Fetch 5-minute candles in 0.35s-spaced batches & batch LTPs without holding runtime.lock."""
     use_smartapi = mode == "LIVE"
     stocks = runtime.broker.resolve_universe_tokens(
         universe_preset=universe_preset,
@@ -448,32 +476,42 @@ def _perform_network_scan(
     evaluations: list[StockEvaluation] = []
     sources_used: set[str] = set()
     rate_limit_msg: str | None = None
+    candles_by_symbol: dict[str, pd.DataFrame] = {}
+    errors_by_symbol: dict[str, str] = {}
+
+    try:
+        candles_by_symbol, errors_by_symbol, sources_used = runtime.broker.fetch_candles_in_batches(
+            stocks=stocks,
+            use_smartapi=use_smartapi,
+            days_back=5,
+            batch_size=10,
+            call_delay_sec=0.35,
+        )
+    except RateLimitError as exc:
+        rate_limit_msg = str(exc)
 
     for stock in stocks:
-        try:
-            candles, src = runtime.broker.fetch_5m_candles(stock, use_smartapi=use_smartapi, days_back=5)
-            sources_used.add(src)
-            ev = evaluate_stock_setup(
-                symbol=stock["symbol"],
-                tradingsymbol=stock["tradingsymbol"],
-                token=stock["token"],
-                candles=candles,
-                capital=risk_cfg.capital,
-                max_sl_rupees=risk_cfg.max_sl_per_trade,
-                live_ltp=ltp_map.get(stock["symbol"]),
+        sym = stock["symbol"]
+        if sym in candles_by_symbol:
+            evaluations.append(
+                evaluate_stock_setup(
+                    symbol=sym,
+                    tradingsymbol=stock["tradingsymbol"],
+                    token=stock["token"],
+                    candles=candles_by_symbol[sym],
+                    capital=risk_cfg.capital,
+                    max_sl_rupees=risk_cfg.max_sl_per_trade,
+                    live_ltp=ltp_map.get(sym),
+                )
             )
-            evaluations.append(ev)
-        except RateLimitError as exc:
-            rate_limit_msg = str(exc)
-            break
-        except Exception as exc:
+        else:
             err_ev = evaluate_stock_setup(
-                symbol=stock["symbol"],
+                symbol=sym,
                 tradingsymbol=stock["tradingsymbol"],
                 token=stock["token"],
                 candles=pd.DataFrame(),
             )
-            evaluations.append(StockEvaluation(**{**err_ev.__dict__, "error": str(exc)}))
+            evaluations.append(StockEvaluation(**{**err_ev.__dict__, "error": errors_by_symbol.get(sym, "No candle data.")}))
 
     return evaluations, ltp_map, sources_used, rate_limit_msg
 
@@ -562,16 +600,26 @@ def run_automation_tick() -> None:
                 runtime.evaluations = evaluations
                 runtime.last_scan_time = now_ist().strftime("%H:%M:%S IST")
                 runtime.data_source = ", ".join(sorted(sources_used)) if sources_used else "-"
-                buy_signals = [e for e in evaluations if e.is_buy_signal]
+                active_signals = [e for e in evaluations if e.has_signal]
                 if rate_limit_msg:
                     runtime.log_event(f"Auto-scan rate limit: {rate_limit_msg}")
                 else:
-                    runtime.log_event(f"Auto-scan: {len(evaluations)} stocks, {len(buy_signals)} BUY signal(s).")
+                    b_cnt = sum(1 for e in active_signals if e.is_buy_signal)
+                    s_cnt = sum(1 for e in active_signals if e.is_sell_signal)
+                    runtime.log_event(f"Auto-scan: {len(evaluations)} stocks, {b_cnt} BUY / {s_cnt} SELL signal(s).")
+                    for sig in active_signals:
+                        sig_key = (sig.symbol, sig.candle_time)
+                        if sig_key not in runtime.notified_signal_candles:
+                            runtime.notified_signal_candles.add(sig_key)
+                            notify_async(
+                                f"[WinWin {sig.side} SIGNAL] {sig.symbol}\nEntry: ₹{sig.price:.2f} | SL: ₹{sig.stop_loss:.2f} | Target: ₹{sig.target:.2f} | Qty: {sig.qty}",
+                                cfg=runtime.tg_config,
+                            )
 
-                if auto_exec and buy_signals:
+                if auto_exec and active_signals:
                     snapshot, summary, _ = _sync_and_snapshot_unlocked(mode=mode, risk_cfg=cfg)
-                    for sig in buy_signals:
-                        if snapshot.trades_used >= cfg.max_trades_per_day:
+                    for sig in active_signals:
+                        if cfg.max_trades_per_day > 0 and snapshot.trades_used >= cfg.max_trades_per_day:
                             break
                         sig_key = (sig.symbol, sig.candle_time)
                         if sig.symbol in summary["open_symbols"] or sig_key in runtime.executed_signal_candles:
@@ -623,14 +671,19 @@ def _serialize_state_unlocked(
         for _, row in today_df.iterrows():
             sym = str(row["symbol"])
             st_val = str(row["status"])
+            side_val = str(row.get("side") or "BUY").upper()
             entry_px = float(row["entry_price"])
             qty = int(row["qty"])
             ltp = runtime.ltp_map.get(sym)
             if st_val == "OPEN":
                 current_px = ltp if (ltp is not None and ltp > 0) else entry_px
-                gross = round((current_px - entry_px) * qty, 2)
-                chg = calculate_nse_charges("EQ_INTRADAY", entry_px * qty, current_px * qty)["total"]
-                pnl_val = round(gross - chg, 2)
+                _, chg, pnl_val = calculate_signed_pnl(
+                    entry_price=entry_px,
+                    exit_price=current_px,
+                    qty=qty,
+                    side=side_val,
+                    segment="EQ_INTRADAY",
+                )
             else:
                 current_px = float(row["exit_price"]) if pd.notna(row["exit_price"]) else entry_px
                 chg = float(row["charges"]) if pd.notna(row["charges"]) else 0.0
@@ -642,6 +695,7 @@ def _serialize_state_unlocked(
                     "timestamp": str(row["timestamp"]),
                     "mode": str(row["mode"]),
                     "symbol": sym,
+                    "side": side_val,
                     "qty": qty,
                     "entry_price": entry_px,
                     "stop_loss": float(row["stop_loss"]),
@@ -655,7 +709,7 @@ def _serialize_state_unlocked(
                 }
             )
 
-    signals = [e.__dict__ for e in runtime.evaluations if e.is_buy_signal]
+    signals = [e.__dict__ for e in runtime.evaluations if e.has_signal]
     diagnostics = [e.__dict__ for e in runtime.evaluations]
 
     return {
@@ -670,7 +724,7 @@ def _serialize_state_unlocked(
             "daily_profit_target": DAILY_PROFIT_TARGET,
             "daily_max_loss": DAILY_MAX_LOSS,
             "max_sl_per_trade": MAX_SL_PER_TRADE,
-            "max_trades_per_day": MAX_TRADES_PER_DAY,
+            "max_trades_per_day": risk_cfg.max_trades_per_day,
             "active_window": get_window_label(risk_cfg.window_preset),
             "window_preset": risk_cfg.window_preset,
         },
@@ -703,6 +757,11 @@ def _serialize_state_unlocked(
             "nifty_trend_filter": runtime.nifty_trend_filter,
             "state": runtime.automation_state,
             "activity_log": list(runtime.activity_log),
+        },
+        "telegram": {
+            "enabled": runtime.tg_config.enabled,
+            "configured": runtime.tg_config.is_ready(),
+            "chat_id": runtime.tg_config.chat_id,
         },
         "signals": signals,
         "diagnostics": diagnostics,
@@ -856,6 +915,39 @@ def disconnect_broker() -> dict[str, Any]:
         return {"connected": False, "message": "Angel One SmartAPI disconnected."}
 
 
+@app.post("/api/telegram/config", dependencies=[Depends(require_bearer_token)])
+def save_telegram_settings(req: TelegramConfigRequest) -> dict[str, Any]:
+    """Save Telegram Bot Token, Chat ID, and enabled toggle to .env and runtime."""
+    with runtime.lock:
+        token = req.bot_token.strip() or runtime.tg_config.bot_token
+        chat_id = req.chat_id.strip() or runtime.tg_config.chat_id
+        new_cfg = TelegramConfig(bot_token=token, chat_id=chat_id, enabled=req.enabled)
+        save_telegram_config(new_cfg)
+        runtime.tg_config = load_telegram_config()
+        runtime.log_event(
+            f"Telegram alerts {'enabled' if runtime.tg_config.enabled else 'disabled'}."
+        )
+        return {
+            "ok": True,
+            "enabled": runtime.tg_config.enabled,
+            "configured": runtime.tg_config.is_ready(),
+            "message": "Telegram alerts saved to .env.",
+        }
+
+
+@app.post("/api/telegram/test", dependencies=[Depends(require_bearer_token)])
+def test_telegram_settings(req: TelegramConfigRequest) -> dict[str, Any]:
+    """Send a test Telegram message using submitted or stored credentials."""
+    with runtime.lock:
+        token = req.bot_token.strip() or runtime.tg_config.bot_token
+        chat_id = req.chat_id.strip() or runtime.tg_config.chat_id
+        test_cfg = TelegramConfig(bot_token=token, chat_id=chat_id, enabled=True)
+    ok, detail = send_telegram_message("WinWin Trader: Test alert connected!", cfg=test_cfg)
+    if not ok:
+        raise HTTPException(status_code=400, detail=detail)
+    return {"ok": True, "message": detail}
+
+
 @app.post("/api/scan", dependencies=[Depends(require_bearer_token)])
 def scan_market(req: ScanRequest) -> dict[str, Any]:
     """Run 5-minute scan and optionally auto-execute signals within guardrails."""
@@ -893,16 +985,17 @@ def scan_market(req: ScanRequest) -> dict[str, Any]:
             notices.append(f"Rate limit paused scan: {rate_limit_msg}")
         else:
             buy_count = sum(1 for e in evaluations if e.is_buy_signal)
+            sell_count = sum(1 for e in evaluations if e.is_sell_signal)
             tag = "Read-only preview" if (req.preview_outside_window and not snapshot.within_active_window) else "Scan complete"
-            notices.append(f"{tag}: {len(evaluations)} stocks evaluated, {buy_count} BUY signal(s).")
+            notices.append(f"{tag}: {len(evaluations)} stocks evaluated, {buy_count} BUY / {sell_count} SELL signal(s).")
         runtime.log_event(notices[0])
 
         snapshot, summary, sync_events = _sync_and_snapshot_unlocked(mode=req.mode, risk_cfg=cfg)
         events = events + sync_events
 
         if req.auto_execute and snapshot.can_trade and not req.preview_outside_window:
-            for sig in [e for e in evaluations if e.is_buy_signal]:
-                if snapshot.trades_used >= cfg.max_trades_per_day:
+            for sig in [e for e in evaluations if e.has_signal]:
+                if cfg.max_trades_per_day > 0 and snapshot.trades_used >= cfg.max_trades_per_day:
                     break
                 sig_key = (sig.symbol, sig.candle_time)
                 if sig.symbol in summary["open_symbols"] or sig_key in runtime.executed_signal_candles:
@@ -931,13 +1024,13 @@ def execute_trade(req: ExecuteRequest) -> dict[str, Any]:
         cfg = _build_risk_cfg(req.capital, req.max_sl, req.max_trades, req.window_preset)
         snapshot, summary, events = _sync_and_snapshot_unlocked(mode=req.mode, risk_cfg=cfg)
         sig = next(
-            (e for e in runtime.evaluations if e.symbol.upper() == req.symbol.upper() and e.is_buy_signal),
+            (e for e in runtime.evaluations if e.symbol.upper() == req.symbol.upper() and e.has_signal),
             None,
         )
         if sig is None:
             raise HTTPException(
                 status_code=400,
-                detail=f"No active BUY signal found for {req.symbol}. Run a scan first.",
+                detail=f"No active BUY/SELL signal found for {req.symbol}. Run a scan first.",
             )
 
         try:
@@ -1071,11 +1164,12 @@ def get_fno_state(
 
 @app.post("/api/fno/analyze", dependencies=[Depends(require_bearer_token)])
 def analyze_fno(req: FnoAnalyzeRequest) -> dict[str, Any]:
-    df, _ = runtime.broker.fetch_index_spot_candles(req.underlying, use_smartapi=(req.mode == "LIVE"), days_back=5)
-    trend = evaluate_index_trend(df, index_name=req.underlying)
-    opt_side = "PE" if trend.regime == "BEARISH" else "CE"
+    u_sym = req.underlying.strip().upper()
+    df, _ = runtime.broker.fetch_fno_underlying_candles(u_sym, use_smartapi=(req.mode == "LIVE"), days_back=5)
+    trend = evaluate_index_trend(df, index_name=u_sym)
+    opt_side = req.option_type if req.option_type in ("CE", "PE") else ("PE" if trend.regime == "BEARISH" else "CE")
     contracts = runtime.broker.get_fno_contracts(
-        underlying=req.underlying,
+        underlying=u_sym,
         instrument_type=req.instrument_type,
         spot_price=trend.price if trend.price > 0 else None,
         option_type=opt_side,

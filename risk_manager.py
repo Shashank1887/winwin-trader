@@ -10,11 +10,11 @@ from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# Hardcoded guardrails mandated by strategy rules (cannot be relaxed by UI settings)
+# Hardcoded risk guardrails (daily profit target, kill-switch & SL/trade); max trades/day is optional (0 = Unlimited)
 DAILY_PROFIT_TARGET = 1000.0
 DAILY_MAX_LOSS = 800.0
 MAX_SL_PER_TRADE = 400.0
-MAX_TRADES_PER_DAY = 2
+MAX_TRADES_PER_DAY = 0
 ACTIVE_WINDOW_START = dt_time(9, 20)
 ACTIVE_WINDOW_END = dt_time(11, 30)
 NSE_TICK_SIZE = 0.05
@@ -22,13 +22,14 @@ NSE_TICK_SIZE = 0.05
 SystemStatus = Literal["ACTIVE", "GOAL LOCKED", "KILL-SWITCH LOCKED"]
 WindowPreset = Literal["morning", "split", "full"]
 SegmentType = Literal["EQ_INTRADAY", "NFO_OPTIONS", "NFO_FUTURES"]
+TradeSide = Literal["BUY", "SELL"]
 
 # Conservative safety caps for the optional F&O page (Option Buying / 1-Lot Futures only)
 FNO_MAX_LOTS_CAP = 2
 FNO_DAILY_PROFIT_TARGET = 2500.0
 FNO_DAILY_MAX_LOSS = 1500.0
 FNO_MAX_SL_PER_TRADE = 1500.0
-FNO_MAX_TRADES_PER_DAY = 2
+FNO_MAX_TRADES_PER_DAY = 0
 
 TRADING_WINDOWS: dict[str, dict[str, object]] = {
     "morning": {
@@ -114,7 +115,7 @@ class RiskConfig:
         object.__setattr__(
             self,
             "max_trades_per_day",
-            min(max(1, int(self.max_trades_per_day)), MAX_TRADES_PER_DAY),
+            max(0, int(self.max_trades_per_day)),
         )
         if self.window_preset not in TRADING_WINDOWS:
             object.__setattr__(self, "window_preset", "morning")
@@ -157,13 +158,15 @@ def calculate_position_sizing(
     stop_loss_price: float,
     capital: float,
     max_sl_rupees: float = MAX_SL_PER_TRADE,
+    side: TradeSide = "BUY",
 ) -> PositionSizing:
     """Calculate share quantity for a fixed stop-loss rupee budget and 1:2 target."""
     entry = round_to_tick(float(entry_price))
     sl = round_to_tick(float(stop_loss_price))
     sl_budget = min(float(max_sl_rupees), MAX_SL_PER_TRADE)
+    invalid_sl = sl >= entry if side == "BUY" else sl <= entry
 
-    if entry <= 0 or sl <= 0 or sl >= entry:
+    if entry <= 0 or sl <= 0 or invalid_sl:
         return PositionSizing(
             entry_price=entry,
             stop_loss=sl,
@@ -175,7 +178,7 @@ def calculate_position_sizing(
             required_capital=0.0,
         )
 
-    sl_distance = round(entry - sl, 2)
+    sl_distance = round(entry - sl, 2) if side == "BUY" else round(sl - entry, 2)
     if sl_distance <= 0:
         return PositionSizing(
             entry_price=entry,
@@ -192,9 +195,15 @@ def calculate_position_sizing(
     capital_qty = int(math.floor(float(capital) / entry)) if capital > 0 else 0
     qty = max(0, min(risk_qty, capital_qty))
 
-    target = round_to_tick(entry + 2.0 * sl_distance)
+    if side == "BUY":
+        target = round_to_tick(entry + 2.0 * sl_distance)
+        per_share_reward = target - entry
+    else:
+        target = round_to_tick(max(NSE_TICK_SIZE, entry - 2.0 * sl_distance))
+        per_share_reward = entry - target
+
     max_loss = round(qty * sl_distance, 2)
-    target_profit = round(qty * (target - entry), 2)
+    target_profit = round(qty * per_share_reward, 2)
     required_capital = round(qty * entry, 2)
 
     return PositionSizing(
@@ -256,7 +265,7 @@ def evaluate_risk_state(
             should_auto_square_off=False,
         )
 
-    if trades_used >= cfg.max_trades_per_day:
+    if cfg.max_trades_per_day > 0 and trades_used >= cfg.max_trades_per_day:
         return RiskSnapshot(
             realized_pnl=round(realized_pnl, 2),
             unrealized_pnl=round(unrealized_pnl, 2),
@@ -321,7 +330,7 @@ def can_execute_trade(
         return False, snapshot.status_reason
     if not snapshot.within_active_window:
         return False, f"Scanning and trading are restricted to {get_window_label(cfg.window_preset)}."
-    if snapshot.trades_used >= cfg.max_trades_per_day:
+    if cfg.max_trades_per_day > 0 and snapshot.trades_used >= cfg.max_trades_per_day:
         return False, f"Max {cfg.max_trades_per_day} trades per day already used."
     if symbol in open_symbols:
         return False, f"An open position already exists for {symbol}."
@@ -362,7 +371,7 @@ class FnoRiskConfig:
         object.__setattr__(
             self,
             "max_trades_per_day",
-            min(max(1, int(self.max_trades_per_day)), FNO_MAX_TRADES_PER_DAY),
+            max(0, int(self.max_trades_per_day)),
         )
         if self.window_preset not in TRADING_WINDOWS:
             object.__setattr__(self, "window_preset", "morning")
@@ -373,17 +382,40 @@ def compute_trailing_stop_loss(
     current_sl: float,
     target_price: float,
     ltp: float,
+    side: str = "BUY",
 ) -> tuple[float, str]:
     """Compute stepped Trailing SL: Break-Even at +1R, Profit-Lock (+0.75R) at +1.5R."""
-    if entry_price <= 0 or target_price <= entry_price or ltp <= entry_price:
-        return round(current_sl, 2), ""
-
-    risk_dist = round((target_price - entry_price) / 2.0, 2)
-    if risk_dist <= 0:
+    side_u = str(side or "BUY").upper()
+    if entry_price <= 0 or ltp <= 0:
         return round(current_sl, 2), ""
 
     candidate = current_sl
     stage = ""
+
+    if side_u == "SELL":
+        if target_price >= entry_price or ltp >= entry_price:
+            return round(current_sl, 2), ""
+        risk_dist = round((entry_price - target_price) / 2.0, 2)
+        if risk_dist <= 0:
+            return round(current_sl, 2), ""
+        if ltp <= entry_price - 1.5 * risk_dist:
+            lock_px = round_to_tick(entry_price - 0.75 * risk_dist)
+            if lock_px < candidate:
+                candidate = lock_px
+                stage = "TRAIL PROFIT LOCK (+0.75R)"
+        elif ltp <= entry_price - 1.0 * risk_dist:
+            be_px = round_to_tick(entry_price)
+            if be_px < candidate:
+                candidate = be_px
+                stage = "TRAIL BREAK-EVEN (1R)"
+        return round(candidate, 2), stage
+
+    if target_price <= entry_price or ltp <= entry_price:
+        return round(current_sl, 2), ""
+    risk_dist = round((target_price - entry_price) / 2.0, 2)
+    if risk_dist <= 0:
+        return round(current_sl, 2), ""
+
     if ltp >= entry_price + 1.5 * risk_dist:
         lock_px = round_to_tick(entry_price + 0.75 * risk_dist)
         if lock_px > candidate:
@@ -450,3 +482,28 @@ def calculate_nse_charges(
         "gst": round(gst, 2),
         "total": total,
     }
+
+
+def calculate_signed_pnl(
+    entry_price: float,
+    exit_price: float,
+    qty: int,
+    side: str = "BUY",
+    segment: SegmentType = "EQ_INTRADAY",
+) -> tuple[float, float, float]:
+    """Compute (gross_pnl, charges, net_pnl) for either BUY or SELL trades."""
+    side_u = str(side or "BUY").upper()
+    qty_i = int(qty)
+    entry_f = float(entry_price)
+    exit_f = float(exit_price)
+
+    if side_u == "SELL":
+        gross = round((entry_f - exit_f) * qty_i, 2)
+        buy_val, sell_val = exit_f * qty_i, entry_f * qty_i
+    else:
+        gross = round((exit_f - entry_f) * qty_i, 2)
+        buy_val, sell_val = entry_f * qty_i, exit_f * qty_i
+
+    charges = calculate_nse_charges(segment=segment, buy_value=buy_val, sell_value=sell_val)["total"]
+    net = round(gross - charges, 2)
+    return gross, charges, net

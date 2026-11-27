@@ -314,7 +314,7 @@
         </label>
       </div>
       <label class="row between" style="font-size:13px;font-weight:600;">
-        <span>Auto-Execute BUY setups during Auto-Pilot (strictly ₹400 SL, max 2/day)</span>
+        <span>Auto-Execute BUY/SELL setups during Auto-Pilot (strictly ₹400 SL)</span>
         <input type="checkbox" id="chkAutoExec" style="width:20px;height:20px;" />
       </label>
       <div id="autoLogBox" class="empty hidden" style="font-family:monospace;font-size:11px;max-height:110px;overflow:auto;"></div>
@@ -362,18 +362,31 @@
       </div>
       <div class="grid3">
         <label class="field">
-          Index
+          Index / Stock
           <select id="selFnoUnderlying" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
-            <option value="NIFTY">NIFTY</option>
-            <option value="BANKNIFTY">BANKNIFTY</option>
-            <option value="FINNIFTY">FINNIFTY</option>
+            <option value="NIFTY">NIFTY (Index)</option>
+            <option value="BANKNIFTY">BANKNIFTY (Index)</option>
+            <option value="FINNIFTY">FINNIFTY (Index)</option>
+            <option value="RELIANCE">RELIANCE</option>
+            <option value="HDFCBANK">HDFCBANK</option>
+            <option value="ICICIBANK">ICICIBANK</option>
+            <option value="SBIN">SBIN</option>
+            <option value="INFY">INFY</option>
+            <option value="TCS">TCS</option>
+            <option value="TATAMOTORS">TATAMOTORS</option>
+            <option value="AXISBANK">AXISBANK</option>
+            <option value="LT">LT</option>
+            <option value="BHARTIARTL">BHARTIARTL</option>
+            <option value="BAJFINANCE">BAJFINANCE</option>
+            <option value="TRENT">TRENT</option>
+            <option value="BEL">BEL</option>
           </select>
         </label>
         <label class="field">
           Segment
           <select id="selFnoInstrument" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
-            <option value="OPTIDX">Options (CE/PE)</option>
-            <option value="FUTIDX">Futures (Buy)</option>
+            <option value="OPTIDX">Index Options (CE/PE)</option>
+            <option value="FUTIDX">Index Futures (Buy)</option>
           </select>
         </label>
         <label class="field">
@@ -432,8 +445,8 @@
           <input type="number" id="inMaxSl" value="400" max="400" min="50" />
         </label>
         <label class="field">
-          Trades (≤2)
-          <input type="number" id="inMaxTrades" value="2" max="2" min="1" />
+          Max Trades (0=Off)
+          <input type="number" id="inMaxTrades" value="0" max="50" min="0" />
         </label>
       </div>
       <label class="field">
@@ -447,8 +460,8 @@
       <label class="field">
         Stock Screener Universe
         <select id="selUniversePreset" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
-          <option value="top15">Top 15 Liquid Nifty 50 (~8s)</option>
-          <option value="nifty50">Full Nifty 50 — 50 Stocks (~22s)</option>
+          <option value="nifty50">Full Nifty 50 — All 50 Stocks (0.35s batch)</option>
+          <option value="top15">Top 15 Liquid Nifty 50 (~6s)</option>
           <option value="custom">Custom NSE Watchlist</option>
         </select>
       </label>
@@ -516,9 +529,9 @@
         apiToken: "",
         capital: "50000",
         maxSl: "400",
-        maxTrades: "2",
+        maxTrades: "0",
         windowPreset: "morning",
-        universePreset: "top15",
+        universePreset: "nifty50",
         customSymbols: "RELIANCE, TCS, TRENT, BEL, HAL",
         trailingSlEnabled: true,
         niftyTrendFilter: true
@@ -617,7 +630,7 @@
       $("mRealized").textContent = `Gross ${formatINR(snap.gross_realized_pnl || 0, true)} | Chg ₹${Number(snap.total_charges || 0).toFixed(0)}`;
       $("mGoal").textContent = `₹${Math.round(snap.realized_pnl)} / ₹1,000`;
       $("mGoalPct").textContent = `${Number(snap.goal_progress_pct || 0).toFixed(0)}% of daily target`;
-      $("mTrades").textContent = `${snap.trades_used} / ${snap.max_trades}`;
+      $("mTrades").textContent = Number(snap.max_trades) > 0 ? `${snap.trades_used} / ${snap.max_trades}` : `${snap.trades_used} (No limit)`;
       $("mOpenCount").textContent = `${snap.open_positions_count} open position(s)`;
       $("navTradesBtn").textContent = `Trade Book (${snap.open_positions_count})`;
 
@@ -660,6 +673,11 @@
       if (typeof auto.auto_square_off_eod === "boolean") $("selAutoEod").value = String(auto.auto_square_off_eod);
       if (typeof auto.auto_execute === "boolean") $("chkAutoExec").checked = auto.auto_execute;
 
+      const tg = d.telegram || {};
+      if (typeof tg.enabled === "boolean") $("chkTgEnabled").checked = tg.enabled;
+      if (tg.chat_id && !$("inTgChat").value) $("inTgChat").value = tg.chat_id;
+      if (tg.configured) $("inTgToken").placeholder = "Saved in .env (leave blank to keep)";
+
       const logBox = $("autoLogBox");
       const logs = auto.activity_log || [];
       logBox.classList.toggle("hidden", logs.length === 0);
@@ -675,7 +693,7 @@
       if (!d.signals || d.signals.length === 0) {
         const empty = document.createElement("div");
         empty.className = "empty";
-        empty.textContent = "No Nifty 50 stocks currently match all 3 BUY conditions (Price > VWAP, 9 EMA > 21 EMA crossover, RSI 55–68 & Vol > 1.5x Avg20).";
+        empty.textContent = "No Nifty 50 stocks currently match BUY (Close > VWAP, 9>21 EMA, RSI 52–70, Vol > 1.2x) or SELL (Close < VWAP, 9<21 EMA, RSI 30–48, Vol > 1.2x).";
         sigBox.appendChild(empty);
       } else {
         d.signals.forEach((s) => {
@@ -689,7 +707,7 @@
           sym.textContent = s.symbol;
           const badge = document.createElement("span");
           badge.className = "badge";
-          badge.textContent = `BUY • Qty ${s.qty}`;
+          badge.textContent = `${s.side || "BUY"} • Qty ${s.qty}`;
           top.append(sym, badge);
 
           const mid = document.createElement("div");
@@ -771,7 +789,7 @@
           mode: currentMode(),
           capital: state.cfg.capital || "50000",
           max_sl: state.cfg.maxSl || "400",
-          max_trades: state.cfg.maxTrades || "2",
+          max_trades: state.cfg.maxTrades ?? "0",
           window_preset: state.cfg.windowPreset || "morning",
           trailing_sl_enabled: String(state.cfg.trailingSlEnabled !== false),
           nifty_trend_filter: String(state.cfg.niftyTrendFilter !== false)
@@ -791,9 +809,9 @@
           mode: currentMode(),
           capital: Number(state.cfg.capital || 50000),
           max_sl: Number(state.cfg.maxSl || 400),
-          max_trades: Number(state.cfg.maxTrades || 2),
+          max_trades: Number(state.cfg.maxTrades ?? 0),
           window_preset: state.cfg.windowPreset || "morning",
-          universe_preset: state.cfg.universePreset || "top15",
+          universe_preset: state.cfg.universePreset || "nifty50",
           custom_symbols: state.cfg.customSymbols || "",
           trailing_sl_enabled: state.cfg.trailingSlEnabled !== false,
           nifty_trend_filter: state.cfg.niftyTrendFilter !== false,
@@ -815,7 +833,7 @@
           symbol,
           capital: Number(state.cfg.capital || 50000),
           max_sl: Number(state.cfg.maxSl || 400),
-          max_trades: Number(state.cfg.maxTrades || 2),
+          max_trades: Number(state.cfg.maxTrades ?? 0),
           window_preset: state.cfg.windowPreset || "morning"
         });
         render();
@@ -855,9 +873,9 @@
           auto_square_off_eod: $("selAutoEod").value === "true",
           capital: Number(state.cfg.capital || 50000),
           max_sl: Number(state.cfg.maxSl || 400),
-          max_trades: Number(state.cfg.maxTrades || 2),
+          max_trades: Number(state.cfg.maxTrades ?? 0),
           window_preset: state.cfg.windowPreset || "morning",
-          universe_preset: state.cfg.universePreset || "top15",
+          universe_preset: state.cfg.universePreset || "nifty50",
           custom_symbols: state.cfg.customSymbols || "",
           trailing_sl_enabled: state.cfg.trailingSlEnabled !== false,
           nifty_trend_filter: state.cfg.niftyTrendFilter !== false
@@ -901,7 +919,7 @@
           mode: currentMode(),
           capital: Number(state.cfg.capital || 50000),
           max_sl: Number(state.cfg.maxSl || 400),
-          max_trades: Number(state.cfg.maxTrades || 2),
+          max_trades: Number(state.cfg.maxTrades ?? 0),
           window_preset: state.cfg.windowPreset || "morning"
         });
         render();
@@ -918,7 +936,7 @@
           mode: currentMode(),
           capital: Number(state.cfg.capital || 50000),
           max_sl: Number(state.cfg.maxSl || 400),
-          max_trades: Number(state.cfg.maxTrades || 2),
+          max_trades: Number(state.cfg.maxTrades ?? 0),
           window_preset: state.cfg.windowPreset || "morning"
         });
         render();
@@ -934,7 +952,8 @@
 
     $("btnSaveServer").addEventListener("click", async () => {
       const clampedSl = Math.min(400, Math.max(50, Number($("inMaxSl").value || 400)));
-      const clampedTrades = Math.min(2, Math.max(1, Number($("inMaxTrades").value || 2)));
+      const rawTrades = $("inMaxTrades").value === "" ? 0 : Number($("inMaxTrades").value);
+      const clampedTrades = Math.min(50, Math.max(0, isNaN(rawTrades) ? 0 : rawTrades));
       $("inMaxSl").value = clampedSl;
       $("inMaxTrades").value = clampedTrades;
       state.cfg = {
@@ -944,7 +963,7 @@
         maxSl: String(clampedSl),
         maxTrades: String(clampedTrades),
         windowPreset: $("selWindowPreset").value || "morning",
-        universePreset: $("selUniversePreset").value || "top15",
+        universePreset: $("selUniversePreset").value || "nifty50",
         customSymbols: $("inCustomSymbols").value || "",
         trailingSlEnabled: $("chkTrailingSl").checked,
         niftyTrendFilter: $("chkNiftyFilter").checked
@@ -1001,6 +1020,20 @@
     }
 
     $("btnFnoSync").addEventListener("click", syncFnoState);
+    $("selFnoUnderlying").addEventListener("change", () => {
+      const isIdx = ["NIFTY", "BANKNIFTY", "FINNIFTY"].includes($("selFnoUnderlying").value);
+      const selInst = $("selFnoInstrument");
+      selInst.replaceChildren();
+      const opts = isIdx
+        ? [["OPTIDX", "Index Options (CE/PE)"], ["FUTIDX", "Index Futures (Buy)"]]
+        : [["OPTSTK", "Stock Options (CE/PE)"], ["FUTSTK", "Stock Futures (Buy)"]];
+      opts.forEach(([val, lbl]) => {
+        const o = document.createElement("option");
+        o.value = val;
+        o.textContent = lbl;
+        selInst.appendChild(o);
+      });
+    });
     $("btnFnoAnalyze").addEventListener("click", async () => {
       try {
         const res = await apiCall("/api/fno/analyze", "POST", {
@@ -1044,7 +1077,7 @@
           qty: Number(c.lotsize) * lots,
           entry_price: Number($("inFnoEntryPx").value || 100),
           sl_points: Number($("inFnoSlPts").value || 15),
-          segment: $("selFnoInstrument").value === "OPTIDX" ? "NFO_OPTIONS" : "NFO_FUTURES",
+          segment: $("selFnoInstrument").value.startsWith("OPT") ? "NFO_OPTIONS" : "NFO_FUTURES",
           window_preset: state.cfg.windowPreset || "morning",
           risk_ack: $("chkFnoAck").checked
         });

@@ -25,6 +25,7 @@ from risk_manager import (
     IST,
     SegmentType,
     calculate_nse_charges,
+    calculate_signed_pnl,
     compute_trailing_stop_loss,
     now_ist,
 )
@@ -33,7 +34,7 @@ from strategy import NIFTY50_ALL_SYMBOLS, NIFTY50_LIQUID_UNIVERSE, UniversePrese
 SCRIP_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 CACHE_DIR = Path(".cache")
 SCRIP_CACHE_FILE = CACHE_DIR / "nse_eq_tokens.json"
-NFO_CACHE_FILE = CACHE_DIR / "nfo_contracts.json"
+NFO_CACHE_FILE = CACHE_DIR / "nfo_contracts_v2.json"
 
 INDEX_UNIVERSE: dict[str, dict[str, str]] = {
     "NIFTY": {"symbol": "NIFTY", "tradingsymbol": "Nifty 50", "token": "99926000", "yahoo_symbol": "^NSEI"},
@@ -132,7 +133,7 @@ def save_credentials(creds: AngelCredentials, env_path: str | Path = ".env") -> 
 class RateLimiter:
     """Thread-safe minimum-interval rate limiter for REST API calls."""
 
-    def __init__(self, min_interval_sec: float = 0.4) -> None:
+    def __init__(self, min_interval_sec: float = 0.35) -> None:
         self.min_interval_sec = min_interval_sec
         self._lock = threading.Lock()
         self._last_call = 0.0
@@ -169,7 +170,7 @@ class AngelOneBroker:
         self.is_connected: bool = False
         self.profile_name: str = ""
         self.last_error: str = ""
-        self._candle_limiter = RateLimiter(min_interval_sec=0.4)
+        self._candle_limiter = RateLimiter(min_interval_sec=0.35)
         self._quote_limiter = RateLimiter(min_interval_sec=1.05)
         self._order_limiter = RateLimiter(min_interval_sec=0.2)
 
@@ -267,7 +268,7 @@ class AngelOneBroker:
 
     def resolve_universe_tokens(
         self,
-        universe_preset: UniversePreset = "top15",
+        universe_preset: UniversePreset = "nifty50",
         custom_symbols: str = "",
     ) -> list[dict[str, str]]:
         """Resolve NSE equity tokens for Top 15, Full Nifty 50, or Custom Watchlist."""
@@ -332,6 +333,49 @@ class AngelOneBroker:
                 pass
 
         return self._fetch_yfinance_candles(stock, days_back=days_back), "NSE Live (yfinance)"
+
+    def fetch_candles_in_batches(
+        self,
+        stocks: list[dict[str, str]],
+        use_smartapi: bool,
+        days_back: int = 5,
+        batch_size: int = 10,
+        call_delay_sec: float = 0.35,
+        on_progress: Any = None,
+    ) -> tuple[dict[str, pd.DataFrame], dict[str, str], set[str]]:
+        """Fetch historical 5m candles in batches with a 0.35s delay between calls."""
+        candles_by_symbol: dict[str, pd.DataFrame] = {}
+        errors_by_symbol: dict[str, str] = {}
+        sources_used: set[str] = set()
+
+        total = len(stocks)
+        step = max(1, int(batch_size))
+        processed = 0
+        last_call_ep = 0.0
+
+        for start in range(0, total, step):
+            batch = stocks[start : start + step]
+            for stock in batch:
+                processed += 1
+                if on_progress is not None:
+                    on_progress(processed, total, stock)
+
+                if call_delay_sec > 0 and last_call_ep > 0:
+                    elapsed = time.monotonic() - last_call_ep
+                    if elapsed < call_delay_sec:
+                        time.sleep(call_delay_sec - elapsed)
+
+                last_call_ep = time.monotonic()
+                try:
+                    df, src = self.fetch_5m_candles(stock, use_smartapi=use_smartapi, days_back=days_back)
+                    candles_by_symbol[stock["symbol"]] = df
+                    sources_used.add(src)
+                except RateLimitError:
+                    raise
+                except Exception as exc:
+                    errors_by_symbol[stock["symbol"]] = str(exc)
+
+        return candles_by_symbol, errors_by_symbol, sources_used
 
     def _fetch_smartapi_candles(self, stock: dict[str, str], days_back: int = 5) -> pd.DataFrame:
         to_dt = now_ist()
@@ -464,6 +508,20 @@ class AngelOneBroker:
         idx_info = INDEX_UNIVERSE.get(index_name.upper(), INDEX_UNIVERSE["NIFTY"])
         return self.fetch_5m_candles(idx_info, use_smartapi=use_smartapi, days_back=days_back)
 
+    def fetch_fno_underlying_candles(
+        self,
+        underlying: str = "NIFTY",
+        use_smartapi: bool = False,
+        days_back: int = 5,
+    ) -> tuple[pd.DataFrame, str]:
+        """Fetch 5-minute spot candles for either an Index or a Nifty 50 F&O Stock."""
+        key = underlying.strip().upper()
+        if key in INDEX_UNIVERSE:
+            return self.fetch_index_spot_candles(key, use_smartapi=use_smartapi, days_back=days_back)
+        stocks = self.resolve_universe_tokens(universe_preset="custom", custom_symbols=key)
+        stock = stocks[0] if stocks else {"symbol": key, "tradingsymbol": f"{key}-EQ", "token": "", "yahoo_symbol": f"{key}.NS"}
+        return self.fetch_5m_candles(stock, use_smartapi=use_smartapi, days_back=days_back)
+
     def fetch_nfo_ltp(
         self,
         contracts: list[dict[str, Any]],
@@ -506,15 +564,18 @@ class AngelOneBroker:
         option_type: str = "CE",
         max_strikes: int = 5,
     ) -> list[dict[str, Any]]:
-        """Return nearest-expiry NFO Option or Future contracts from Angel One scrip master."""
+        """Return nearest-expiry NFO Index or Stock Option/Future contracts from scrip master."""
         contracts = _load_cached_nfo_contracts()
         today_date = now_ist().date()
+        inst_u = instrument_type.strip().upper()
+        is_option = inst_u in ("OPTIDX", "OPTSTK")
+        is_future = inst_u in ("FUTIDX", "FUTSTK")
 
         filtered = []
         for row in contracts:
-            if row.get("name") != underlying.upper():
+            if row.get("name") != underlying.strip().upper():
                 continue
-            if row.get("instrumenttype") != instrument_type.upper():
+            if row.get("instrumenttype") != inst_u:
                 continue
             try:
                 exp_dt = datetime.strptime(str(row["expiry"]), "%d%b%Y").date()
@@ -522,7 +583,7 @@ class AngelOneBroker:
                 continue
             if exp_dt < today_date:
                 continue
-            if instrument_type.upper() == "OPTIDX":
+            if is_option:
                 sym = str(row["tradingsymbol"])
                 if option_type in ("CE", "PE") and not sym.endswith(option_type):
                     continue
@@ -534,7 +595,7 @@ class AngelOneBroker:
         nearest_exp = min(r["_exp_dt"] for r in filtered)
         nearest_rows = [r for r in filtered if r["_exp_dt"] == nearest_exp]
 
-        if instrument_type.upper() == "FUTIDX":
+        if is_future:
             filtered.sort(key=lambda r: r["_exp_dt"])
             return [{k: v for k, v in r.items() if k != "_exp_dt"} for r in filtered[:2]]
 
@@ -562,15 +623,45 @@ class AngelOneBroker:
         exchange: str = "NSE",
         producttype: str = "INTRADAY",
     ) -> dict[str, Any]:
-        """Place a live MARKET BUY order plus protective SL-M and Target LIMIT exits."""
+        """Backward-compatible wrapper for placing a protected live BUY order."""
+        return self.place_live_order_with_protection(
+            symbol=symbol,
+            tradingsymbol=tradingsymbol,
+            token=token,
+            qty=qty,
+            entry_price_hint=entry_price_hint,
+            stop_loss=stop_loss,
+            target=target,
+            side="BUY",
+            exchange=exchange,
+            producttype=producttype,
+        )
+
+    def place_live_order_with_protection(
+        self,
+        symbol: str,
+        tradingsymbol: str,
+        token: str,
+        qty: int,
+        entry_price_hint: float,
+        stop_loss: float,
+        target: float,
+        side: str = "BUY",
+        exchange: str = "NSE",
+        producttype: str = "INTRADAY",
+    ) -> dict[str, Any]:
+        """Place a live MARKET BUY/SELL entry plus protective SL-M and Target LIMIT exits."""
         if not self.is_connected or self.client is None:
             raise BrokerAuthError("Connect Angel One SmartAPI before placing live orders.")
+
+        entry_side = "SELL" if str(side).upper() == "SELL" else "BUY"
+        exit_side = "BUY" if entry_side == "SELL" else "SELL"
 
         entry_params = {
             "variety": "NORMAL",
             "tradingsymbol": tradingsymbol,
             "symboltoken": str(token),
-            "transactiontype": "BUY",
+            "transactiontype": entry_side,
             "exchange": exchange,
             "ordertype": "MARKET",
             "producttype": producttype,
@@ -583,11 +674,11 @@ class AngelOneBroker:
         entry_resp = self._call_with_retry(self._order_limiter, self.client.placeOrderFullResponse, entry_params)
         if not isinstance(entry_resp, dict) or not entry_resp.get("status"):
             msg = entry_resp.get("message", "Unknown order rejection") if isinstance(entry_resp, dict) else str(entry_resp)
-            raise BrokerOrderError(f"Live BUY order failed for {tradingsymbol}: {msg}")
+            raise BrokerOrderError(f"Live {entry_side} order failed for {tradingsymbol}: {msg}")
 
         entry_order_id = str((entry_resp.get("data") or {}).get("orderid") or "")
         if not entry_order_id:
-            raise BrokerOrderError(f"Live BUY order returned no order ID for {tradingsymbol}.")
+            raise BrokerOrderError(f"Live {entry_side} order returned no order ID for {tradingsymbol}.")
 
         fill_price = self._resolve_fill_price(entry_order_id, fallback=entry_price_hint)
 
@@ -601,7 +692,7 @@ class AngelOneBroker:
                 "variety": "STOPLOSS",
                 "tradingsymbol": tradingsymbol,
                 "symboltoken": str(token),
-                "transactiontype": "SELL",
+                "transactiontype": exit_side,
                 "exchange": exchange,
                 "ordertype": "STOPLOSS_MARKET",
                 "producttype": producttype,
@@ -620,13 +711,13 @@ class AngelOneBroker:
         except Exception as exc:
             notes.append(f"SL order warning: {exc}")
 
-        # Target Limit Sell order
+        # Target Limit Exit order
         try:
             tgt_params = {
                 "variety": "NORMAL",
                 "tradingsymbol": tradingsymbol,
                 "symboltoken": str(token),
-                "transactiontype": "SELL",
+                "transactiontype": exit_side,
                 "exchange": exchange,
                 "ordertype": "LIMIT",
                 "producttype": producttype,
@@ -767,11 +858,13 @@ class AngelOneBroker:
                     pass
 
         exchange = str(trade.get("exchange") or ("NFO" if str(trade.get("segment", "")).startswith("NFO") else "NSE"))
+        entry_side = str(trade.get("side") or "BUY").upper()
+        exit_side = "BUY" if entry_side == "SELL" else "SELL"
         exit_params = {
             "variety": "NORMAL",
             "tradingsymbol": str(trade["tradingsymbol"]),
             "symboltoken": str(trade["token"]),
-            "transactiontype": "SELL",
+            "transactiontype": exit_side,
             "exchange": exchange,
             "ordertype": "MARKET",
             "producttype": "INTRADAY",
@@ -840,7 +933,7 @@ def _load_cached_nfo_contracts() -> list[dict[str, Any]]:
 
 
 def _cache_scrip_master_subsets(master: list[dict[str, Any]]) -> None:
-    """Save compact NSE -EQ and NFO OPTIDX/FUTIDX subsets from OpenAPIScripMaster.json."""
+    """Save compact NSE -EQ and NFO Index/Stock Option & Future subsets from OpenAPIScripMaster.json."""
     token_map = {
         str(row["symbol"]): str(row["token"])
         for row in master
@@ -849,12 +942,13 @@ def _cache_scrip_master_subsets(master: list[dict[str, Any]]) -> None:
     if token_map:
         SCRIP_CACHE_FILE.write_text(json.dumps(token_map), encoding="utf-8")
 
+    allowed_nfo_names = {"NIFTY", "BANKNIFTY", "FINNIFTY"} | set(NIFTY50_ALL_SYMBOLS)
     nfo_rows = []
     for row in master:
         if (
             row.get("exch_seg") == "NFO"
-            and row.get("instrumenttype") in ("OPTIDX", "FUTIDX")
-            and row.get("name") in ("NIFTY", "BANKNIFTY", "FINNIFTY")
+            and row.get("instrumenttype") in ("OPTIDX", "FUTIDX", "OPTSTK", "FUTSTK")
+            and str(row.get("name") or "").upper() in allowed_nfo_names
         ):
             try:
                 strike_raw = float(row.get("strike") or 0.0)
@@ -864,8 +958,8 @@ def _cache_scrip_master_subsets(master: list[dict[str, Any]]) -> None:
                 continue
             nfo_rows.append(
                 {
-                    "name": str(row["name"]),
-                    "instrumenttype": str(row["instrumenttype"]),
+                    "name": str(row["name"]).upper(),
+                    "instrumenttype": str(row["instrumenttype"]).upper(),
                     "tradingsymbol": str(row["symbol"]),
                     "token": str(row["token"]),
                     "expiry": str(row.get("expiry") or ""),
@@ -970,8 +1064,9 @@ class TradeBookManager:
         notes: str = "",
         segment: SegmentType = "EQ_INTRADAY",
         exchange: str = "NSE",
+        side: str = "BUY",
     ) -> dict[str, Any]:
-        """Log a new open intraday BUY trade to trades_log.csv."""
+        """Log a new open intraday trade (BUY or SELL) to trades_log.csv."""
         ts = now_ist()
         row = {
             "trade_id": f"{mode[:1]}-{ts.strftime('%H%M%S')}-{uuid.uuid4().hex[:4].upper()}",
@@ -983,7 +1078,7 @@ class TradeBookManager:
             "symbol": symbol,
             "tradingsymbol": tradingsymbol,
             "token": str(token),
-            "side": "BUY",
+            "side": str(side or "BUY").upper(),
             "qty": int(qty),
             "entry_price": round(float(entry_price), 2),
             "stop_loss": round(float(stop_loss), 2),
@@ -1036,15 +1131,15 @@ class TradeBookManager:
             qty = int(df.at[idx, "qty"])
             entry_price = float(df.at[idx, "entry_price"])
             segment = str(df.at[idx, "segment"] or "EQ_INTRADAY")
+            side = str(df.at[idx, "side"] or "BUY").upper()
             exit_px = round(float(exit_price), 2)
-            gross_pnl = round((exit_px - entry_price) * qty, 2)
-            charges_info = calculate_nse_charges(
+            gross_pnl, total_charges, net_pnl = calculate_signed_pnl(
+                entry_price=entry_price,
+                exit_price=exit_px,
+                qty=qty,
+                side=side,
                 segment=segment,  # type: ignore[arg-type]
-                buy_value=entry_price * qty,
-                sell_value=exit_px * qty,
             )
-            total_charges = charges_info["total"]
-            net_pnl = round(gross_pnl - total_charges, 2)
 
             df.at[idx, "exit_price"] = exit_px
             df.at[idx, "exit_time"] = ts
@@ -1086,22 +1181,32 @@ class TradeBookManager:
             sl = float(row["stop_loss"])
             tgt = float(row["target"])
             trade_id = str(row["trade_id"])
+            side = str(row.get("side") or "BUY").upper()
 
             if mode == "PAPER" and auto_close_paper_sl_target:
-                if ltp <= sl:
-                    exit_px = min(sl, ltp) if ltp < sl * 0.995 else sl
+                sl_hit = (ltp >= sl) if side == "SELL" else (ltp <= sl)
+                tgt_hit = (ltp <= tgt) if side == "SELL" else (ltp >= tgt)
+                if sl_hit:
+                    if side == "SELL":
+                        exit_px = max(sl, ltp) if ltp > sl * 1.005 else sl
+                    else:
+                        exit_px = min(sl, ltp) if ltp < sl * 0.995 else sl
                     pnl = self.close_trade(trade_id, exit_px, "SL HIT")
                     events.append({"trade_id": trade_id, "symbol": sym, "reason": "SL HIT", "pnl": pnl})
                     continue
-                if ltp >= tgt:
-                    exit_px = max(tgt, ltp) if ltp > tgt * 1.005 else tgt
+                if tgt_hit:
+                    if side == "SELL":
+                        exit_px = min(tgt, ltp) if ltp < tgt * 0.995 else tgt
+                    else:
+                        exit_px = max(tgt, ltp) if ltp > tgt * 1.005 else tgt
                     pnl = self.close_trade(trade_id, exit_px, "TARGET HIT")
                     events.append({"trade_id": trade_id, "symbol": sym, "reason": "TARGET HIT", "pnl": pnl})
                     continue
 
             if enable_trailing_sl:
-                new_sl, trail_stage = compute_trailing_stop_loss(entry_px, sl, tgt, ltp)
-                if new_sl > sl:
+                new_sl, trail_stage = compute_trailing_stop_loss(entry_px, sl, tgt, ltp, side=side)
+                improved = (new_sl < sl) if side == "SELL" else (new_sl > sl)
+                if improved:
                     if mode == "LIVE" and broker is not None:
                         broker.modify_live_sl_order(row.to_dict(), new_sl)
                     self.update_trade_sl(trade_id, new_sl, note=f"{trail_stage} -> ₹{new_sl:.2f}")
@@ -1154,8 +1259,15 @@ class TradeBookManager:
                 qty = int(row["qty"])
                 entry_px = float(row["entry_price"])
                 seg = str(row["segment"] or "EQ_INTRADAY")
-                est_chg = calculate_nse_charges(seg, entry_px * qty, float(ltp) * qty)["total"]  # type: ignore[arg-type]
-                unrealized_pnl += ((float(ltp) - entry_px) * qty) - est_chg
+                side = str(row.get("side") or "BUY").upper()
+                _, _, net_open = calculate_signed_pnl(
+                    entry_price=entry_px,
+                    exit_price=float(ltp),
+                    qty=qty,
+                    side=side,
+                    segment=seg,  # type: ignore[arg-type]
+                )
+                unrealized_pnl += net_open
 
         realized_pnl = round(realized_pnl, 2)
         gross_realized_pnl = round(gross_realized_pnl, 2)

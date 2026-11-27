@@ -32,6 +32,7 @@ from strategy import (
     UniversePreset,
     evaluate_index_trend,
     evaluate_stock_setup,
+    run_strategy_backtest,
 )
 
 
@@ -53,11 +54,17 @@ def execute_single_trade(
     enforce_nifty_filter: bool = True,
 ) -> tuple[bool, str]:
     """Validate guardrails (including NIFTY Trend Filter) and execute Paper or Live BUY."""
+    side = "SELL" if (getattr(signal_eval, "side", "BUY") == "SELL" or getattr(signal_eval, "is_sell_signal", False)) else "BUY"
     if enforce_nifty_filter and index_trend is not None and index_trend.error is None:
-        if index_trend.regime == "BEARISH":
+        if side == "BUY" and index_trend.regime == "BEARISH":
             return (
                 False,
                 f"Blocked by NIFTY 50 Trend Filter (NIFTY {index_trend.price} is BEARISH; avoid counter-trend equity BUY).",
+            )
+        if side == "SELL" and index_trend.regime == "BULLISH":
+            return (
+                False,
+                f"Blocked by NIFTY 50 Trend Filter (NIFTY {index_trend.price} is BULLISH; avoid counter-trend equity SELL).",
             )
 
     broker: AngelOneBroker = st.session_state.broker
@@ -89,19 +96,20 @@ def execute_single_trade(
             entry_price=fill_px,
             stop_loss=signal_eval.stop_loss,
             target=signal_eval.target,
-            notes="Simulated fill at live market price",
+            notes=f"Simulated {side} fill at live market price",
             segment="EQ_INTRADAY",
             exchange="NSE",
+            side=side,
         )
         msg = (
-            f"PAPER BUY executed: {signal_eval.qty} x {signal_eval.symbol} @ ₹{fill_px:.2f} "
+            f"PAPER {side} executed: {signal_eval.qty} x {signal_eval.symbol} @ ₹{fill_px:.2f} "
             f"(SL ₹{signal_eval.stop_loss:.2f} | Target ₹{signal_eval.target:.2f})"
         )
         notify_async(f"[WinWin] {msg}", cfg=st.session_state.get("tg_config"))
         return True, msg
 
     try:
-        order_res = broker.place_live_buy_with_protection(
+        order_res = broker.place_live_order_with_protection(
             symbol=signal_eval.symbol,
             tradingsymbol=signal_eval.tradingsymbol,
             token=signal_eval.token,
@@ -109,6 +117,7 @@ def execute_single_trade(
             entry_price_hint=signal_eval.price,
             stop_loss=signal_eval.stop_loss,
             target=signal_eval.target,
+            side=side,
             exchange="NSE",
         )
         trade_book.record_entry(
@@ -126,9 +135,10 @@ def execute_single_trade(
             notes=order_res["notes"],
             segment="EQ_INTRADAY",
             exchange="NSE",
+            side=side,
         )
         msg = (
-            f"LIVE BUY placed: {signal_eval.qty} x {signal_eval.tradingsymbol} @ ₹{order_res['fill_price']:.2f} "
+            f"LIVE {side} placed: {signal_eval.qty} x {signal_eval.tradingsymbol} @ ₹{order_res['fill_price']:.2f} "
             f"(Order ID: {order_res['entry_order_id']})"
         )
         notify_async(f"[WinWin] {msg}", cfg=st.session_state.get("tg_config"))
@@ -205,10 +215,10 @@ def run_market_scan(
     allow_outside_window_preview: bool = False,
     show_progress: bool = True,
 ) -> None:
-    """Scan selected NSE stock universe on 5m candles and evaluate NIFTY 50 Index Trend."""
+    """Scan selected NSE stock universe in 0.35s-spaced batches and evaluate closed candles."""
     broker: AngelOneBroker = st.session_state.broker
     use_smartapi = mode == "LIVE"
-    u_preset: UniversePreset = st.session_state.get("universe_preset", "top15")
+    u_preset: UniversePreset = st.session_state.get("universe_preset", "nifty50")
     c_syms: str = st.session_state.get("custom_symbols", "")
     stocks = broker.resolve_universe_tokens(universe_preset=u_preset, custom_symbols=c_syms)
 
@@ -226,39 +236,58 @@ def run_market_scan(
     evaluations: list[StockEvaluation] = []
     sources_used: set[str] = set()
     rate_limit_hit = False
+    candles_by_symbol: dict[str, pd.DataFrame] = {}
+    errors_by_symbol: dict[str, str] = {}
 
-    progress = st.progress(0, text=f"Scanning {len(stocks)} NSE stocks...") if show_progress else None
-    for idx, stock in enumerate(stocks):
+    progress = st.progress(0, text=f"Scanning {len(stocks)} NSE stocks in batches...") if show_progress else None
+
+    def _on_progress(done: int, total: int, stock: dict[str, str]) -> None:
         if progress is not None:
-            progress.progress((idx + 1) / len(stocks), text=f"Scanning {stock['symbol']} ({idx + 1}/{len(stocks)})...")
-        try:
-            candles, src = broker.fetch_5m_candles(stock, use_smartapi=use_smartapi, days_back=5)
-            sources_used.add(src)
+            progress.progress(done / total, text=f"Scanning {stock['symbol']} ({done}/{total})...")
+
+    try:
+        candles_by_symbol, errors_by_symbol, sources_used = broker.fetch_candles_in_batches(
+            stocks=stocks,
+            use_smartapi=use_smartapi,
+            days_back=5,
+            batch_size=10,
+            call_delay_sec=0.35,
+            on_progress=_on_progress,
+        )
+    except RateLimitError as exc:
+        rate_limit_hit = True
+        st.session_state.last_notice = ("error", f"Rate limit paused scan: {exc}")
+        log_autopilot_event(f"Rate limit paused scan: {exc}")
+    finally:
+        if progress is not None:
+            progress.empty()
+
+    cached_candles = dict(st.session_state.get("last_scan_candles", {}))
+    cached_candles.update(candles_by_symbol)
+    st.session_state.last_scan_candles = cached_candles
+
+    for stock in stocks:
+        sym = stock["symbol"]
+        if sym in candles_by_symbol:
             ev = evaluate_stock_setup(
-                symbol=stock["symbol"],
+                symbol=sym,
                 tradingsymbol=stock["tradingsymbol"],
                 token=stock["token"],
-                candles=candles,
+                candles=candles_by_symbol[sym],
                 capital=risk_cfg.capital,
                 max_sl_rupees=risk_cfg.max_sl_per_trade,
-                live_ltp=ltp_map.get(stock["symbol"]),
+                live_ltp=ltp_map.get(sym),
             )
             evaluations.append(ev)
-        except RateLimitError as exc:
-            rate_limit_hit = True
-            st.session_state.last_notice = ("error", f"Rate limit paused scan at {stock['symbol']}: {exc}")
-            log_autopilot_event(f"Rate limit paused scan at {stock['symbol']}: {exc}")
-            break
-        except Exception as exc:
+        else:
+            err_msg = errors_by_symbol.get(sym, "No candle data fetched.")
             err_ev = evaluate_stock_setup(
-                symbol=stock["symbol"],
+                symbol=sym,
                 tradingsymbol=stock["tradingsymbol"],
                 token=stock["token"],
                 candles=pd.DataFrame(),
             )
-            evaluations.append(StockEvaluation(**{**err_ev.__dict__, "error": str(exc)}))
-    if progress is not None:
-        progress.empty()
+            evaluations.append(StockEvaluation(**{**err_ev.__dict__, "error": err_msg}))
 
     st.session_state.evaluations = evaluations
     st.session_state.last_scan_time = risk_manager.now_ist().strftime("%H:%M:%S IST")
@@ -267,21 +296,76 @@ def run_market_scan(
 
     if not rate_limit_hit:
         mode_tag = "Read-only preview" if allow_outside_window_preview else "Scan complete"
-        buy_signals = [e for e in evaluations if e.is_buy_signal]
-        buy_count = len(buy_signals)
-        summary_msg = f"{mode_tag}: {len(evaluations)} stocks evaluated, {buy_count} BUY signal(s) found."
+        active_signals = [e for e in evaluations if e.has_signal]
+        buy_count = sum(1 for e in active_signals if e.is_buy_signal)
+        sell_count = sum(1 for e in active_signals if e.is_sell_signal)
+        summary_msg = f"{mode_tag}: {len(evaluations)} stocks evaluated — {buy_count} BUY, {sell_count} SELL signal(s)."
         st.session_state.last_notice = ("info", summary_msg)
         log_autopilot_event(summary_msg)
         notified: set[tuple[str, str]] = st.session_state.get("notified_signal_candles", set())
-        for sig in buy_signals:
+        for sig in active_signals:
             sig_key = (sig.symbol, sig.candle_time)
             if sig_key not in notified:
                 notified.add(sig_key)
                 notify_async(
-                    f"[WinWin BUY SIGNAL] {sig.symbol}\nEntry: ₹{sig.price:.2f} | SL: ₹{sig.stop_loss:.2f} | Target: ₹{sig.target:.2f} | Qty: {sig.qty}",
+                    f"[WinWin {sig.side} SIGNAL] {sig.symbol}\nEntry: ₹{sig.price:.2f} | SL: ₹{sig.stop_loss:.2f} | Target: ₹{sig.target:.2f} | Qty: {sig.qty}",
                     cfg=st.session_state.get("tg_config"),
                 )
         st.session_state.notified_signal_candles = notified
+
+
+def run_last_5_days_backtest(
+    mode: str,
+    risk_cfg: RiskConfig,
+    show_progress: bool = True,
+) -> dict[str, Any]:
+    """Run 5-day historical backtest across the selected watchlist (₹400 SL / ₹800 Target)."""
+    broker: AngelOneBroker = st.session_state.broker
+    use_smartapi = mode == "LIVE"
+    u_preset: UniversePreset = st.session_state.get("universe_preset", "nifty50")
+    c_syms: str = st.session_state.get("custom_symbols", "")
+    stocks = broker.resolve_universe_tokens(universe_preset=u_preset, custom_symbols=c_syms)
+
+    cached_candles: dict[str, pd.DataFrame] = dict(st.session_state.get("last_scan_candles", {}))
+    missing_stocks = [s for s in stocks if s["symbol"] not in cached_candles or cached_candles[s["symbol"]].empty]
+
+    if missing_stocks:
+        progress = st.progress(0, text=f"Fetching 5d history for {len(missing_stocks)} stocks...") if show_progress else None
+
+        def _on_prog(done: int, total: int, stock: dict[str, str]) -> None:
+            if progress is not None:
+                progress.progress(done / total, text=f"Loading 5d candles: {stock['symbol']} ({done}/{total})...")
+
+        try:
+            fetched, _, _ = broker.fetch_candles_in_batches(
+                stocks=missing_stocks,
+                use_smartapi=use_smartapi,
+                days_back=7,
+                batch_size=10,
+                call_delay_sec=0.35,
+                on_progress=_on_prog,
+            )
+            cached_candles.update(fetched)
+            st.session_state.last_scan_candles = cached_candles
+        finally:
+            if progress is not None:
+                progress.empty()
+
+    target_map = {s["symbol"]: cached_candles[s["symbol"]] for s in stocks if s["symbol"] in cached_candles}
+    result = run_strategy_backtest(
+        candles_by_symbol=target_map,
+        capital=risk_cfg.capital,
+        sl_rupees=400.0,
+        target_rupees=800.0,
+        days=5,
+    )
+    st.session_state.backtest_result = result
+    st.session_state.last_notice = (
+        "info",
+        f"5-Day Backtest: {result['total_signals']} signal(s) across {result['stocks_tested']} stocks | "
+        f"Win Rate {result['win_rate_pct']}% | Net P&L ₹{result['net_pnl']:+,.2f}",
+    )
+    return result
 
 
 def build_risk_snapshot(mode: str, risk_cfg: RiskConfig) -> tuple[RiskSnapshot, dict[str, Any]]:

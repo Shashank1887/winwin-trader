@@ -13,6 +13,7 @@ from risk_manager import (
     DAILY_PROFIT_TARGET,
     RiskConfig,
     calculate_nse_charges,
+    calculate_signed_pnl,
     can_execute_trade,
     get_window_end_time,
     get_window_label,
@@ -23,6 +24,7 @@ from trading_actions import (
     execute_panic_square_off,
     execute_single_trade,
     log_autopilot_event,
+    run_last_5_days_backtest,
     run_market_scan,
 )
 
@@ -86,7 +88,7 @@ elif not risk_snapshot.within_active_window:
 
 if nifty_filter_on and index_trend and index_trend.error is None and index_trend.regime == "BEARISH":
     st.warning(
-        f"NIFTY 50 Trend Filter Active: Index is BEARISH ({index_trend.price:,.1f} < EMA21 {index_trend.ema_21:,.1f}). New equity BUY entries are blocked to protect capital.",
+        f"NIFTY 50 Trend Filter Active: Index is BEARISH ({index_trend.price:,.1f} < EMA21 {index_trend.ema_21:,.1f}). Counter-trend BUY entries are blocked; SELL setups remain allowed.",
         icon=":material/shield:",
     )
 
@@ -122,10 +124,20 @@ c2.metric(
     icon=":material/flag:",
 )
 
+trades_cap_label = (
+    f"{risk_snapshot.trades_used} / {risk_snapshot.max_trades}"
+    if risk_snapshot.max_trades > 0
+    else f"{risk_snapshot.trades_used}"
+)
+trades_delta = (
+    f"{risk_snapshot.open_positions_count} open"
+    if risk_snapshot.max_trades > 0
+    else f"{risk_snapshot.open_positions_count} open (No daily limit)"
+)
 c3.metric(
     "Trades Used",
-    f"{risk_snapshot.trades_used} / {risk_snapshot.max_trades}",
-    delta=f"{risk_snapshot.open_positions_count} open",
+    trades_cap_label,
+    delta=trades_delta,
     delta_color="off",
     border=True,
     icon=":material/swap_horiz:",
@@ -164,12 +176,11 @@ with st.container(border=True):
         interval_choice = st.segmented_control(
             "Scan interval",
             options=["30s", "60s", "180s", "300s"],
-            default="60s",
             key="autopilot_interval",
         )
     with ap_c2:
         st.checkbox(
-            "Auto-Execute BUY signals",
+            "Auto-Execute BUY / SELL signals",
             key="auto_execute",
             disabled=not risk_snapshot.can_trade,
         )
@@ -254,21 +265,31 @@ with st.container(border=True):
                 icon=":material/visibility:",
                 key="preview_scan_btn",
                 disabled=not preview_enabled,
-                help="Inspect live/latest 5-minute indicator state outside selected window without allowing execution.",
+                help="Inspect latest closed 5-minute candle indicators outside window without allowing execution.",
             ):
                 run_market_scan(mode=mode, risk_cfg=risk_cfg, allow_outside_window_preview=True)
                 st.rerun()
+
+        if st.button(
+            "Backtest Last 5 Days",
+            icon=":material/history:",
+            key="backtest_btn",
+            disabled=(mode == "LIVE" and not broker.is_connected),
+            help="Simulates this exact BUY/SELL closed-candle strategy over the last 5 trading days (₹400 SL / ₹800 Target).",
+        ):
+            run_last_5_days_backtest(mode=mode, risk_cfg=risk_cfg)
+            st.rerun()
 
         auto_exec = bool(st.session_state.auto_execute) and risk_snapshot.can_trade
         st.caption(f"Last scan: {st.session_state.last_scan_time} • Feed: {st.session_state.data_source}")
 
     evaluations: list[StockEvaluation] = st.session_state.evaluations
-    matching_evals = [e for e in evaluations if e.is_buy_signal]
+    matching_evals = [e for e in evaluations if e.has_signal]
 
     if auto_exec and risk_snapshot.can_trade and matching_evals:
         executed_any = False
         for sig in matching_evals:
-            if risk_snapshot.trades_used >= risk_cfg.max_trades_per_day:
+            if risk_cfg.max_trades_per_day > 0 and risk_snapshot.trades_used >= risk_cfg.max_trades_per_day:
                 break
             sig_key = (sig.symbol, sig.candle_time)
             if sig.symbol in summary["open_symbols"] or sig_key in st.session_state.executed_signal_candles:
@@ -295,6 +316,7 @@ with st.container(border=True):
             [
                 {
                     "Stock": e.symbol,
+                    "Side": e.side,
                     "Entry Price": e.price,
                     "Stop-Loss": e.stop_loss,
                     "Target": e.target,
@@ -306,9 +328,10 @@ with st.container(border=True):
         st.dataframe(
             sig_df,
             hide_index=True,
-            alt="NSE stocks currently matching all 3 intraday BUY conditions",
+            alt="NSE stocks matching closed-candle BUY or SELL conditions",
             column_config={
                 "Stock": st.column_config.TextColumn("Stock"),
+                "Side": st.column_config.TextColumn("Side"),
                 "Entry Price": st.column_config.NumberColumn("Entry Price", format="₹%.2f"),
                 "Stop-Loss": st.column_config.NumberColumn("Stop-Loss", format="₹%.2f"),
                 "Target": st.column_config.NumberColumn("Target", format="₹%.2f"),
@@ -351,7 +374,7 @@ with st.container(border=True):
                 st.rerun()
     else:
         st.info(
-            "No stocks currently match all 3 BUY conditions (Price > VWAP, 9 EMA > 21 EMA bullish crossover, RSI 55–68 & Vol > 1.5x Avg20).",
+            "No stocks currently match BUY (Close > VWAP, 9 EMA > 21 EMA, RSI 52–70, Vol > 1.2x) or SELL (Close < VWAP, 9 EMA < 21 EMA, RSI 30–48, Vol > 1.2x) on the last completed candle.",
             icon=":material/filter_alt:",
         )
         st.button(
@@ -360,6 +383,41 @@ with st.container(border=True):
             key="execute_trade_btn_disabled",
             disabled=True,
         )
+
+    bt_res = st.session_state.get("backtest_result")
+    if bt_res:
+        bt_exp = st.expander(
+            f"Last 5 Days Backtest ({bt_res['total_signals']} signals | Win Rate {bt_res['win_rate_pct']}% | Net ₹{bt_res['net_pnl']:+,.2f})",
+            expanded=True,
+        )
+        with bt_exp:
+            bt_summary_df = pd.DataFrame(bt_res["summary_rows"])
+            st.dataframe(
+                bt_summary_df,
+                hide_index=True,
+                alt="5-day backtest summary with ₹400 SL and ₹800 Target",
+                column_config={
+                    "Gross P&L": st.column_config.NumberColumn("Gross P&L", format="₹%.2f"),
+                    "Charges": st.column_config.NumberColumn("Charges", format="₹%.2f"),
+                    "Net P&L": st.column_config.NumberColumn("Net P&L", format="₹%.2f"),
+                },
+            )
+            if bt_res["trades"]:
+                st.caption(
+                    f"Simulated across {bt_res['stocks_tested']} stocks over last {bt_res['days']} trading days (₹400 SL / ₹800 Target, closed-candle iloc[-2] entry)."
+                )
+                st.dataframe(
+                    pd.DataFrame(bt_res["trades"][:50]),
+                    hide_index=True,
+                    alt="Simulated historical trades (latest 50)",
+                    column_config={
+                        "Entry": st.column_config.NumberColumn("Entry", format="₹%.2f"),
+                        "Exit": st.column_config.NumberColumn("Exit", format="₹%.2f"),
+                        "Gross P&L": st.column_config.NumberColumn("Gross P&L", format="₹%.2f"),
+                        "Charges": st.column_config.NumberColumn("Charges", format="₹%.2f"),
+                        "Net P&L": st.column_config.NumberColumn("Net P&L", format="₹%.2f"),
+                    },
+                )
 
     diag_exp = st.expander(f"Screener diagnostics ({len(evaluations)} stocks)", on_change="rerun")
     if diag_exp.open:
@@ -375,11 +433,10 @@ with st.container(border=True):
                             "EMA 21": e.ema_21,
                             "RSI(14)": e.rsi_14,
                             "Vol Ratio": e.volume_ratio,
-                            "Price>VWAP": e.cond_price_above_vwap,
-                            "EMA Cross": e.cond_ema_bullish_crossover,
-                            "RSI&Vol": e.cond_rsi_and_volume,
-                            "Signal": "BUY" if e.is_buy_signal else ("ERR" if e.error else "WAIT"),
-                            "Candle": e.candle_time,
+                            "BUY Ready": bool(e.cond_price_above_vwap and e.cond_ema_bullish_crossover and (52.0 <= e.rsi_14 <= 70.0) and e.volume_ratio > 1.2),
+                            "SELL Ready": bool(e.cond_price_below_vwap and e.cond_ema_bearish and e.cond_sell_rsi_and_volume),
+                            "Signal": e.side if e.has_signal else ("ERR" if e.error else "WAIT"),
+                            "Closed Candle": e.candle_time,
                             "Note": e.error or "",
                         }
                         for e in evaluations
@@ -387,7 +444,7 @@ with st.container(border=True):
                 )
                 st.dataframe(diag_df, hide_index=True, alt="Indicator breakdown for scanned stocks")
             else:
-                st.caption("Run a scan to inspect 5-minute VWAP, EMA, RSI, and Volume metrics.")
+                st.caption("Run a scan to inspect 5-minute VWAP, EMA, RSI, and Volume metrics on the last closed candle.")
 
 st.space("small")
 
@@ -434,14 +491,19 @@ with st.container(border=True):
         for _, row in today_trades.iterrows():
             sym = str(row["symbol"])
             status_val = str(row["status"])
+            side_val = str(row.get("side") or "BUY").upper()
             entry_px = float(row["entry_price"])
             qty = int(row["qty"])
             ltp = st.session_state.ltp_map.get(sym)
             if status_val == "OPEN":
                 current_px = ltp if (ltp is not None and ltp > 0) else entry_px
-                gross = round((current_px - entry_px) * qty, 2)
-                chg = calculate_nse_charges("EQ_INTRADAY", entry_px * qty, current_px * qty)["total"]
-                net_val = round(gross - chg, 2)
+                gross, chg, net_val = calculate_signed_pnl(
+                    entry_price=entry_px,
+                    exit_price=current_px,
+                    qty=qty,
+                    side=side_val,
+                    segment="EQ_INTRADAY",
+                )
             else:
                 current_px = float(row["exit_price"]) if pd.notna(row["exit_price"]) else entry_px
                 gross = float(row["gross_pnl"]) if pd.notna(row["gross_pnl"]) else 0.0
@@ -453,6 +515,7 @@ with st.container(border=True):
                     "Trade ID": row["trade_id"],
                     "Time": row["timestamp"],
                     "Stock": sym,
+                    "Side": side_val,
                     "Qty": qty,
                     "Entry": entry_px,
                     "Stop-Loss": float(row["stop_loss"]),
