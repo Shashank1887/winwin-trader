@@ -1,0 +1,1158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0F172A" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="WinWin Trader" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <title>WinWin Intraday Trader</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #64748b;
+      --green: #16a34a;
+      --green-bg: #f0fdf4;
+      --green-border: #86efac;
+      --red: #dc2626;
+      --red-bg: #fef2f2;
+      --red-border: #fca5a5;
+      --amber-bg: #fffbeb;
+      --amber-border: #fde68a;
+      --amber-text: #92400e;
+      --blue-bg: #eff6ff;
+      --blue-border: #bfdbfe;
+      --blue-text: #1e40af;
+      --teal: #0d9488;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding-bottom: calc(76px + env(safe-area-inset-bottom));
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      background: var(--card);
+      border-bottom: 1px solid var(--border);
+      padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .title { font-size: 17px; font-weight: 700; margin: 0; }
+    .subtitle { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .mode-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 12px;
+      border: 1px solid var(--green-border);
+      background: var(--green-bg);
+      font-size: 11px;
+      font-weight: 700;
+      color: #166534;
+      cursor: pointer;
+      user-select: none;
+    }
+    .mode-pill.live {
+      border-color: var(--red-border);
+      background: var(--red-bg);
+      color: #991b1b;
+    }
+    .switch-dot {
+      width: 34px;
+      height: 20px;
+      border-radius: 999px;
+      background: var(--green);
+      position: relative;
+      transition: background 0.15s;
+    }
+    .mode-pill.live .switch-dot { background: var(--red); }
+    .switch-dot::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 16px;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #fff;
+      transition: left 0.15s;
+    }
+    .mode-pill.live .switch-dot::after { left: 2px; }
+    main {
+      max-width: 1040px;
+      margin: 0 auto;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .banner {
+      padding: 11px 13px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      font-size: 13px;
+      font-weight: 600;
+      display: none;
+    }
+    .banner.show { display: block; }
+    .banner.success { background: var(--green-bg); border-color: var(--green-border); color: #166534; }
+    .banner.error { background: var(--red-bg); border-color: var(--red-border); color: #991b1b; }
+    .banner.warn { background: var(--amber-bg); border-color: var(--amber-border); color: var(--amber-text); }
+    .banner.info { background: var(--blue-bg); border-color: var(--blue-border); color: var(--blue-text); }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    @media (min-width: 720px) {
+      .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
+    .metric-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+    }
+    .metric-label { font-size: 12px; font-weight: 600; color: var(--muted); }
+    .metric-val { font-size: 19px; font-weight: 700; margin-top: 4px; }
+    .metric-sub { font-size: 11px; color: var(--muted); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .card h2 { margin: 0; font-size: 16px; }
+    .muted { font-size: 12px; color: var(--muted); }
+    .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .between { justify-content: space-between; }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 11px 14px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      flex: 1 1 auto;
+      min-height: 44px;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-dark { background: #0f172a; color: #fff; }
+    .btn-teal { background: var(--teal); color: #fff; }
+    .btn-red { background: var(--red); color: #fff; }
+    .btn-outline { background: #fff; color: var(--text); border-color: #cbd5e1; }
+    .btn-sm { flex: 0 0 auto; padding: 7px 12px; min-height: 34px; font-size: 12px; }
+
+    .item-box {
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 12px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: #ccfbf1;
+      color: #0f766e;
+    }
+    .empty {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 13px;
+      font-size: 13px;
+      color: #475569;
+      line-height: 1.45;
+    }
+    label.field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; font-weight: 600; color: #334155; }
+    input[type="text"], input[type="password"], input[type="number"], input[type="url"] {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      font-size: 15px;
+      color: var(--text);
+    }
+    .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .diag-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 0;
+      border-top: 1px solid #f1f5f9;
+      font-size: 12px;
+    }
+    .hidden { display: none !important; }
+
+    nav.tabbar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: var(--card);
+      border-top: 1px solid var(--border);
+      padding: 8px 12px calc(10px + env(safe-area-inset-bottom));
+      display: flex;
+      gap: 8px;
+      z-index: 30;
+    }
+    .tab-btn {
+      flex: 1;
+      border: none;
+      background: #f1f5f9;
+      color: #475569;
+      padding: 10px 8px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 700;
+      min-height: 42px;
+    }
+    .tab-btn.active { background: #0f172a; color: #fff; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1 class="title">WinWin Intraday Trader</h1>
+      <div class="subtitle" id="clockSubtitle">Nifty 50 Screener • 09:20–11:30 IST</div>
+    </div>
+    <div class="mode-pill" id="modeToggle" role="button" tabindex="0">
+      <span id="modeText">PAPER ON</span>
+      <span class="switch-dot"></span>
+    </div>
+  </header>
+
+  <main>
+    <div id="lockBanner" class="banner"></div>
+    <div id="statusBanner" class="banner"></div>
+
+    <section class="metrics">
+      <div class="metric-card">
+        <div class="metric-label">Today's Net P&amp;L</div>
+        <div class="metric-val" id="mNetPnl">₹0.00</div>
+        <div class="metric-sub" id="mRealized">Realized ₹0.00</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Daily Goal Progress</div>
+        <div class="metric-val" id="mGoal">₹0 / ₹1,000</div>
+        <div class="metric-sub" id="mGoalPct">0% of daily target</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Trades Used</div>
+        <div class="metric-val" id="mTrades">0 / 2</div>
+        <div class="metric-sub" id="mOpenCount">0 open position(s)</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">System Status</div>
+        <div class="metric-val" id="mStatus" style="font-size:15px;">ACTIVE</div>
+        <div class="metric-sub" id="mBroker">Angel One: Disconnected</div>
+      </div>
+    </section>
+
+    <!-- CONTROLLED AUTO-PILOT CARD -->
+    <section class="card" id="autoPilotCard">
+      <div class="row between">
+        <div>
+          <h2>Controlled Auto-Pilot</h2>
+          <div class="muted" id="autoStateText">Status: IDLE (Server background monitor)</div>
+        </div>
+        <button class="btn-dark btn-sm" id="btnToggleAuto">Start Auto-Pilot</button>
+      </div>
+      <div class="grid3">
+        <label class="field">
+          Scan Interval
+          <select id="selScanInterval" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
+            <option value="30">30 sec</option>
+            <option value="60" selected>60 sec</option>
+            <option value="180">3 min</option>
+            <option value="300">5 min</option>
+          </select>
+        </label>
+        <label class="field">
+          LTP Check
+          <select id="selLtpInterval" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
+            <option value="10">10 sec</option>
+            <option value="15" selected>15 sec</option>
+            <option value="30">30 sec</option>
+          </select>
+        </label>
+        <label class="field">
+          Auto 11:30 Exit
+          <select id="selAutoEod" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
+            <option value="false" selected>Off</option>
+            <option value="true">On (11:30 IST)</option>
+          </select>
+        </label>
+      </div>
+      <label class="row between" style="font-size:13px;font-weight:600;">
+        <span>Auto-Execute BUY setups during Auto-Pilot (strictly ₹400 SL, max 2/day)</span>
+        <input type="checkbox" id="chkAutoExec" style="width:20px;height:20px;" />
+      </label>
+      <div id="autoLogBox" class="empty hidden" style="font-family:monospace;font-size:11px;max-height:110px;overflow:auto;"></div>
+    </section>
+
+    <!-- TAB 1: SIGNALS -->
+    <section id="tabSignals" class="card">
+      <div class="row between">
+        <h2>Actionable Signals</h2>
+        <button class="btn-outline btn-sm" id="btnSyncNow">Sync</button>
+      </div>
+      <div class="muted" id="scanMeta">Last scan: - • Feed: -</div>
+
+      <div class="row">
+        <button class="btn-dark" id="btnScan">Scan Nifty 50</button>
+        <button class="btn-outline" id="btnPreview">Preview (Read-Only)</button>
+      </div>
+
+      <div id="signalsList"></div>
+
+      <button class="btn-outline btn-sm" id="btnToggleDiag" style="align-self:flex-start;">
+        Show 15-Stock Diagnostics (0)
+      </button>
+      <div id="diagList" class="hidden"></div>
+    </section>
+
+    <!-- TAB 2: TRADE BOOK -->
+    <section id="tabTrades" class="card hidden">
+      <div class="row between">
+        <h2 id="tradeBookTitle">Today's Trade Book (PAPER)</h2>
+        <button class="btn-outline btn-sm" id="btnRefreshLtps">Refresh LTPs</button>
+      </div>
+      <button class="btn-red" id="btnPanicExit">Square Off All (Panic Exit)</button>
+      <div id="tradesList"></div>
+    </section>
+
+    <!-- TAB 3: OPTIONAL F&O TRADING -->
+    <section id="tabFno" class="card hidden">
+      <div class="row between">
+        <div>
+          <h2>F&amp;O Trading (Optional)</h2>
+          <div class="muted" id="fnoSummaryText">Option Buying (CE/PE) &amp; 1-Lot Futures • Daily Max Loss -₹1,500</div>
+        </div>
+        <button class="btn-outline btn-sm" id="btnFnoSync">Sync</button>
+      </div>
+      <div class="grid3">
+        <label class="field">
+          Index
+          <select id="selFnoUnderlying" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
+            <option value="NIFTY">NIFTY</option>
+            <option value="BANKNIFTY">BANKNIFTY</option>
+            <option value="FINNIFTY">FINNIFTY</option>
+          </select>
+        </label>
+        <label class="field">
+          Segment
+          <select id="selFnoInstrument" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
+            <option value="OPTIDX">Options (CE/PE)</option>
+            <option value="FUTIDX">Futures (Buy)</option>
+          </select>
+        </label>
+        <label class="field">
+          SL (Pts)
+          <input type="number" id="inFnoSlPts" value="15" min="5" max="50" />
+        </label>
+      </div>
+      <button class="btn-dark" id="btnFnoAnalyze">Analyze Spot &amp; Load Contracts</button>
+      <div id="fnoTrendBadge" class="banner"></div>
+      <label class="field">
+        Select NFO Contract
+        <select id="selFnoContract" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;"></select>
+      </label>
+      <div class="grid3">
+        <label class="field">
+          Lots (≤2)
+          <input type="number" id="inFnoLots" value="1" min="1" max="2" />
+        </label>
+        <label class="field" style="grid-column: span 2;">
+          Entry Premium / Price (₹)
+          <input type="number" id="inFnoEntryPx" value="100" step="0.5" />
+        </label>
+      </div>
+      <label class="row between" style="font-size:13px;font-weight:600;">
+        <span>Confirm 1-lot F&amp;O risk &amp; strict SL rules</span>
+        <input type="checkbox" id="chkFnoAck" style="width:20px;height:20px;" />
+      </label>
+      <div class="row">
+        <button class="btn-teal" id="btnFnoExecute">Execute F&amp;O BUY</button>
+        <button class="btn-red" id="btnFnoPanic">Square Off F&amp;O</button>
+      </div>
+      <div id="fnoTradesList"></div>
+    </section>
+
+    <!-- TAB 4: SETTINGS -->
+    <section id="tabSettings" class="card hidden">
+      <h2>Server &amp; Token Setup</h2>
+      <div class="muted">
+        Saved locally in your phone/tablet browser. When opened from your server URL, the Backend URL fills automatically.
+      </div>
+      <label class="field">
+        Backend URL
+        <input type="url" id="inBaseUrl" placeholder="https://your-server.trycloudflare.com" />
+      </label>
+      <label class="field">
+        Mobile API Token (MOBILE_API_TOKEN from .env)
+        <input type="password" id="inApiToken" placeholder="Paste MOBILE_API_TOKEN" />
+      </label>
+      <div class="grid3">
+        <label class="field">
+          Capital (₹)
+          <input type="number" id="inCapital" value="50000" />
+        </label>
+        <label class="field">
+          Max SL (≤400)
+          <input type="number" id="inMaxSl" value="400" max="400" min="50" />
+        </label>
+        <label class="field">
+          Trades (≤2)
+          <input type="number" id="inMaxTrades" value="2" max="2" min="1" />
+        </label>
+      </div>
+      <label class="field">
+        Active Trading Window (IST)
+        <select id="selWindowPreset" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
+          <option value="morning">09:20 – 11:30 IST (Morning)</option>
+          <option value="split">09:20–11:30 &amp; 13:45–14:55 IST</option>
+          <option value="full">09:20 – 15:00 IST (Full Day)</option>
+        </select>
+      </label>
+      <label class="field">
+        Stock Screener Universe
+        <select id="selUniversePreset" style="padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-size:14px;">
+          <option value="top15">Top 15 Liquid Nifty 50 (~8s)</option>
+          <option value="nifty50">Full Nifty 50 — 50 Stocks (~22s)</option>
+          <option value="custom">Custom NSE Watchlist</option>
+        </select>
+      </label>
+      <label class="field hidden" id="customSymbolsField">
+        Custom NSE Symbols (comma-separated)
+        <input type="text" id="inCustomSymbols" placeholder="TRENT, BEL, HAL, TITAN" autocapitalize="characters" />
+      </label>
+      <label class="row between" style="font-size:13px;font-weight:600;">
+        <span>Trailing Stop-Loss + Break-Even (+1R / +1.5R)</span>
+        <input type="checkbox" id="chkTrailingSl" checked style="width:20px;height:20px;" />
+      </label>
+      <label class="row between" style="font-size:13px;font-weight:600;">
+        <span>NIFTY 50 Index Trend Filter (Block BUY if Bearish)</span>
+        <input type="checkbox" id="chkNiftyFilter" checked style="width:20px;height:20px;" />
+      </label>
+      <button class="btn-dark" id="btnSaveServer">Save &amp; Connect Server</button>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:4px 0;" />
+
+      <h2>Angel One SmartAPI Credentials</h2>
+      <div class="muted">Saved to the backend .env file over HTTPS for Live Trading.</div>
+      <label class="field">API Key <input type="password" id="inApiKey" /></label>
+      <label class="field">Client ID <input type="text" id="inClientId" autocapitalize="characters" /></label>
+      <label class="field">Password / PIN <input type="password" id="inPassword" /></label>
+      <label class="field">TOTP Secret <input type="password" id="inTotp" /></label>
+      <div class="row">
+        <button class="btn-dark" id="btnConnectBroker">Save .env &amp; Connect SmartAPI</button>
+        <button class="btn-outline hidden" id="btnDisconnectBroker">Disconnect</button>
+      </div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:4px 0;" />
+
+      <h2>Telegram Mobile Alerts</h2>
+      <div class="muted">Get instant push notifications on BUY signals, executions, SL/Target hits &amp; locks.</div>
+      <label class="field">Bot Token (from @BotFather) <input type="password" id="inTgToken" /></label>
+      <label class="field">Chat ID (from @userinfobot) <input type="text" id="inTgChat" /></label>
+      <label class="row between" style="font-size:13px;font-weight:600;">
+        <span>Enable Telegram Alerts</span>
+        <input type="checkbox" id="chkTgEnabled" checked style="width:20px;height:20px;" />
+      </label>
+      <div class="row">
+        <button class="btn-dark" id="btnSaveTg">Save Telegram Alerts</button>
+        <button class="btn-outline" id="btnTestTg">Send Test Alert</button>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabbar">
+    <button class="tab-btn active" data-tab="signals">Signals</button>
+    <button class="tab-btn" data-tab="trades" id="navTradesBtn">Trade Book (0)</button>
+    <button class="tab-btn" data-tab="fno">F&amp;O</button>
+    <button class="tab-btn" data-tab="settings">Settings</button>
+  </nav>
+
+  <script>
+    const STORAGE_KEY = "winwin_mobile_web_cfg_v1";
+    const defaultOrigin = window.location.protocol.startsWith("http") ? window.location.origin : "";
+    let state = {
+      paperMode: true,
+      tab: "signals",
+      showDiag: false,
+      data: null,
+      cfg: {
+        baseUrl: defaultOrigin,
+        apiToken: "",
+        capital: "50000",
+        maxSl: "400",
+        maxTrades: "2",
+        windowPreset: "morning",
+        universePreset: "top15",
+        customSymbols: "RELIANCE, TCS, TRENT, BEL, HAL",
+        trailingSlEnabled: true,
+        niftyTrendFilter: true
+      },
+      fnoContracts: [],
+      fnoData: null
+    };
+
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        state.cfg = { ...state.cfg, ...parsed };
+        if (!state.cfg.baseUrl && defaultOrigin) state.cfg.baseUrl = defaultOrigin;
+      }
+    } catch {}
+
+    const $ = (id) => document.getElementById(id);
+
+    function formatINR(val, signed = false) {
+      const num = Number(val || 0);
+      const abs = Math.abs(num).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      if (num < 0) return `-₹${abs}`;
+      if (signed && num > 0) return `+₹${abs}`;
+      return `₹${abs}`;
+    }
+
+    function showStatus(msg, kind = "info") {
+      const el = $("statusBanner");
+      if (!msg) {
+        el.className = "banner";
+        el.textContent = "";
+        return;
+      }
+      el.className = `banner show ${kind}`;
+      el.textContent = msg;
+    }
+
+    function currentMode() {
+      return state.paperMode ? "PAPER" : "LIVE";
+    }
+
+    async function apiCall(path, method = "GET", body = null) {
+      const base = (state.cfg.baseUrl || "").trim().replace(/\/+$/, "");
+      const token = (state.cfg.apiToken || "").trim();
+      if (!base) throw new Error("Set Backend URL in Settings.");
+      if (!token) throw new Error("Enter your MOBILE_API_TOKEN in Settings first.");
+
+      const res = await fetch(`${base}${path}`, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const text = await res.text();
+      let json = {};
+      try { json = text ? JSON.parse(text) : {}; } catch { json = { detail: text }; }
+      if (!res.ok) throw new Error(json.detail || json.message || `HTTP ${res.status}`);
+      return json;
+    }
+
+    function setTab(tab) {
+      state.tab = tab;
+      $("tabSignals").classList.toggle("hidden", tab !== "signals");
+      $("tabTrades").classList.toggle("hidden", tab !== "trades");
+      $("tabFno").classList.toggle("hidden", tab !== "fno");
+      $("tabSettings").classList.toggle("hidden", tab !== "settings");
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.tab === tab);
+      });
+      if (tab === "fno" && state.cfg.baseUrl && state.cfg.apiToken) syncFnoState();
+    }
+
+    function render() {
+      const pill = $("modeToggle");
+      pill.classList.toggle("live", !state.paperMode);
+      $("modeText").textContent = state.paperMode ? "PAPER ON" : "LIVE API";
+      $("tradeBookTitle").textContent = `Today's Trade Book (${currentMode()})`;
+
+      const d = state.data;
+      if (!d) return;
+
+      const idxTxt = d.index_trend && !d.index_trend.error
+        ? ` • NIFTY ${Number(d.index_trend.price).toFixed(0)} (${d.index_trend.regime})`
+        : "";
+      $("clockSubtitle").textContent = `NSE 5m • ${(d.guardrails && d.guardrails.active_window) || "09:20–11:30 IST"}${idxTxt} • ${d.time_ist}`;
+      $("scanMeta").textContent = `Last scan: ${d.last_scan_time} • Feed: ${d.data_source}`;
+
+      const snap = d.risk_snapshot;
+      const net = Number(snap.net_pnl || 0);
+      const mNet = $("mNetPnl");
+      mNet.textContent = formatINR(net, true);
+      mNet.className = `metric-val ${net > 0 ? "pos" : net < 0 ? "neg" : ""}`;
+      $("mRealized").textContent = `Gross ${formatINR(snap.gross_realized_pnl || 0, true)} | Chg ₹${Number(snap.total_charges || 0).toFixed(0)}`;
+      $("mGoal").textContent = `₹${Math.round(snap.realized_pnl)} / ₹1,000`;
+      $("mGoalPct").textContent = `${Number(snap.goal_progress_pct || 0).toFixed(0)}% of daily target`;
+      $("mTrades").textContent = `${snap.trades_used} / ${snap.max_trades}`;
+      $("mOpenCount").textContent = `${snap.open_positions_count} open position(s)`;
+      $("navTradesBtn").textContent = `Trade Book (${snap.open_positions_count})`;
+
+      const mStatus = $("mStatus");
+      mStatus.textContent = snap.system_status;
+      mStatus.className = `metric-val ${
+        snap.system_status === "GOAL LOCKED" ? "pos" : snap.system_status === "KILL-SWITCH LOCKED" ? "neg" : ""
+      }`;
+      $("mBroker").textContent = d.broker_connected ? `Angel One: ${d.broker_profile}` : "Angel One: Disconnected";
+      $("btnDisconnectBroker").classList.toggle("hidden", !d.broker_connected);
+
+      const lockEl = $("lockBanner");
+      if (snap.system_status === "GOAL LOCKED") {
+        lockEl.className = "banner show success";
+        lockEl.textContent = "Goal Achieved! Daily realized P&L reached +₹1,000. Trading auto-locked for today.";
+      } else if (snap.system_status === "KILL-SWITCH LOCKED") {
+        lockEl.className = "banner show error";
+        lockEl.textContent = `Kill-Switch Activated! ${snap.status_reason} All new orders are locked.`;
+      } else if (!snap.within_active_window) {
+        lockEl.className = "banner show warn";
+        lockEl.textContent = `Outside selected window (${(d.guardrails && d.guardrails.active_window) || "09:20–11:30 IST"}). Order execution is paused.`;
+      } else {
+        lockEl.className = "banner";
+        lockEl.textContent = "";
+      }
+
+      $("btnScan").disabled = !snap.can_trade;
+      $("btnPreview").classList.toggle("hidden", snap.within_active_window);
+      $("btnRefreshLtps").disabled = snap.open_positions_count === 0;
+      $("btnPanicExit").disabled = snap.open_positions_count === 0;
+
+      const auto = d.automation || {};
+      const autoOn = Boolean(auto.enabled);
+      $("autoStateText").textContent = `Status: ${auto.state || "IDLE"} • Runs on server even when screen is locked`;
+      const btnAuto = $("btnToggleAuto");
+      btnAuto.textContent = autoOn ? "Stop Auto-Pilot" : "Start Auto-Pilot";
+      btnAuto.className = autoOn ? "btn-red btn-sm" : "btn-dark btn-sm";
+      if (auto.scan_interval_sec) $("selScanInterval").value = String(auto.scan_interval_sec);
+      if (auto.ltp_interval_sec) $("selLtpInterval").value = String(auto.ltp_interval_sec);
+      if (typeof auto.auto_square_off_eod === "boolean") $("selAutoEod").value = String(auto.auto_square_off_eod);
+      if (typeof auto.auto_execute === "boolean") $("chkAutoExec").checked = auto.auto_execute;
+
+      const logBox = $("autoLogBox");
+      const logs = auto.activity_log || [];
+      logBox.classList.toggle("hidden", logs.length === 0);
+      logBox.replaceChildren();
+      logs.slice(0, 12).forEach((line) => {
+        const div = document.createElement("div");
+        div.textContent = line;
+        logBox.appendChild(div);
+      });
+
+      const sigBox = $("signalsList");
+      sigBox.replaceChildren();
+      if (!d.signals || d.signals.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No Nifty 50 stocks currently match all 3 BUY conditions (Price > VWAP, 9 EMA > 21 EMA crossover, RSI 55–68 & Vol > 1.5x Avg20).";
+        sigBox.appendChild(empty);
+      } else {
+        d.signals.forEach((s) => {
+          const box = document.createElement("div");
+          box.className = "item-box";
+
+          const top = document.createElement("div");
+          top.className = "row between";
+          const sym = document.createElement("strong");
+          sym.style.fontSize = "16px";
+          sym.textContent = s.symbol;
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = `BUY • Qty ${s.qty}`;
+          top.append(sym, badge);
+
+          const mid = document.createElement("div");
+          mid.style.fontSize = "13px";
+          mid.style.fontWeight = "600";
+          mid.textContent = `Entry ₹${s.price.toFixed(2)} • SL ₹${s.stop_loss.toFixed(2)} • Target ₹${s.target.toFixed(2)}`;
+
+          const sub = document.createElement("div");
+          sub.className = "muted";
+          sub.textContent = `RSI ${s.rsi_14} • Vol ${s.volume_ratio}x • VWAP ₹${s.vwap.toFixed(2)}`;
+
+          const btn = document.createElement("button");
+          btn.className = "btn-teal";
+          btn.textContent = `Execute Trade (${s.symbol})`;
+          btn.disabled = !snap.can_trade;
+          btn.onclick = () => executeSymbol(s.symbol);
+
+          box.append(top, mid, sub, btn);
+          sigBox.appendChild(box);
+        });
+      }
+
+      const diagCount = (d.diagnostics || []).length;
+      $("btnToggleDiag").textContent = `${state.showDiag ? "Hide" : "Show"} Stock Diagnostics (${diagCount})`;
+      const diagBox = $("diagList");
+      diagBox.classList.toggle("hidden", !state.showDiag);
+      diagBox.replaceChildren();
+      (d.diagnostics || []).forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "diag-row";
+        const left = document.createElement("strong");
+        left.textContent = item.symbol;
+        const right = document.createElement("span");
+        right.className = "muted";
+        right.textContent = `₹${Number(item.price).toFixed(2)} | VWAP ${Number(item.vwap).toFixed(2)} | RSI ${item.rsi_14} | Vol ${item.volume_ratio}x`;
+        row.append(left, right);
+        diagBox.appendChild(row);
+      });
+
+      const tradesBox = $("tradesList");
+      tradesBox.replaceChildren();
+      if (!d.trades || d.trades.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = `No ${currentMode()} trades logged today yet.`;
+        tradesBox.appendChild(empty);
+      } else {
+        d.trades.forEach((tr) => {
+          const box = document.createElement("div");
+          box.className = "item-box";
+
+          const top = document.createElement("div");
+          top.className = "row between";
+          const left = document.createElement("strong");
+          left.textContent = `${tr.symbol} (${tr.qty} qty)`;
+          const pnl = document.createElement("strong");
+          pnl.className = tr.pnl >= 0 ? "pos" : "neg";
+          pnl.textContent = formatINR(tr.pnl, true);
+          top.append(left, pnl);
+
+          const mid = document.createElement("div");
+          mid.style.fontSize = "13px";
+          mid.textContent = `Entry ₹${tr.entry_price.toFixed(2)} • LTP/Exit ₹${tr.ltp_or_exit.toFixed(2)} • SL ₹${tr.stop_loss.toFixed(2)} • Tgt ₹${tr.target.toFixed(2)}`;
+
+          const sub = document.createElement("div");
+          sub.className = "muted";
+          sub.textContent = `${tr.status}${tr.exit_reason ? " (" + tr.exit_reason + ")" : ""} • ${tr.timestamp}`;
+
+          box.append(top, mid, sub);
+          tradesBox.appendChild(box);
+        });
+      }
+    }
+
+    async function syncState() {
+      try {
+        showStatus("");
+        const qs = new URLSearchParams({
+          mode: currentMode(),
+          capital: state.cfg.capital || "50000",
+          max_sl: state.cfg.maxSl || "400",
+          max_trades: state.cfg.maxTrades || "2",
+          window_preset: state.cfg.windowPreset || "morning",
+          trailing_sl_enabled: String(state.cfg.trailingSlEnabled !== false),
+          nifty_trend_filter: String(state.cfg.niftyTrendFilter !== false)
+        }).toString();
+        state.data = await apiCall(`/api/state?${qs}`);
+        render();
+        if (state.data.notice) showStatus(state.data.notice, "info");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    }
+
+    async function runScan(previewOutsideWindow) {
+      try {
+        showStatus("Scanning selected stock universe...", "info");
+        state.data = await apiCall("/api/scan", "POST", {
+          mode: currentMode(),
+          capital: Number(state.cfg.capital || 50000),
+          max_sl: Number(state.cfg.maxSl || 400),
+          max_trades: Number(state.cfg.maxTrades || 2),
+          window_preset: state.cfg.windowPreset || "morning",
+          universe_preset: state.cfg.universePreset || "top15",
+          custom_symbols: state.cfg.customSymbols || "",
+          trailing_sl_enabled: state.cfg.trailingSlEnabled !== false,
+          nifty_trend_filter: state.cfg.niftyTrendFilter !== false,
+          preview_outside_window: previewOutsideWindow,
+          auto_execute: $("chkAutoExec").checked
+        });
+        render();
+        showStatus(state.data.notice || "Scan complete.", "info");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    }
+
+    async function executeSymbol(symbol) {
+      try {
+        showStatus(`Executing ${symbol}...`, "info");
+        state.data = await apiCall("/api/execute", "POST", {
+          mode: currentMode(),
+          symbol,
+          capital: Number(state.cfg.capital || 50000),
+          max_sl: Number(state.cfg.maxSl || 400),
+          max_trades: Number(state.cfg.maxTrades || 2),
+          window_preset: state.cfg.windowPreset || "morning"
+        });
+        render();
+        showStatus(state.data.notice || `Executed ${symbol}`, "success");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    }
+
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => setTab(btn.dataset.tab));
+    });
+
+    $("modeToggle").addEventListener("click", () => {
+      if (state.paperMode) {
+        if (!confirm("Switch to LIVE TRADING? Orders will use real money via Angel One API.")) return;
+        state.paperMode = false;
+      } else {
+        state.paperMode = true;
+      }
+      render();
+      syncState();
+    });
+
+    $("btnSyncNow").addEventListener("click", syncState);
+    $("btnScan").addEventListener("click", () => runScan(false));
+    $("btnPreview").addEventListener("click", () => runScan(true));
+
+    async function pushAutomationConfig(nextEnabled) {
+      try {
+        state.data = await apiCall("/api/automation", "POST", {
+          enabled: nextEnabled,
+          mode: currentMode(),
+          scan_interval_sec: Number($("selScanInterval").value || 60),
+          ltp_interval_sec: Number($("selLtpInterval").value || 15),
+          auto_execute: $("chkAutoExec").checked,
+          auto_square_off_eod: $("selAutoEod").value === "true",
+          capital: Number(state.cfg.capital || 50000),
+          max_sl: Number(state.cfg.maxSl || 400),
+          max_trades: Number(state.cfg.maxTrades || 2),
+          window_preset: state.cfg.windowPreset || "morning",
+          universe_preset: state.cfg.universePreset || "top15",
+          custom_symbols: state.cfg.customSymbols || "",
+          trailing_sl_enabled: state.cfg.trailingSlEnabled !== false,
+          nifty_trend_filter: state.cfg.niftyTrendFilter !== false
+        });
+        render();
+        showStatus(state.data.notice || "Auto-Pilot updated.", "info");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    }
+
+    $("btnToggleAuto").addEventListener("click", () => {
+      const currentlyEnabled = Boolean(state.data && state.data.automation && state.data.automation.enabled);
+      if (!currentlyEnabled && $("chkAutoExec").checked && !state.paperMode) {
+        if (!confirm("Start LIVE Auto-Pilot with Auto-Execute ON? Real Angel One orders will run automatically.")) return;
+      }
+      pushAutomationConfig(!currentlyEnabled);
+    });
+
+    ["selScanInterval", "selLtpInterval", "selAutoEod", "chkAutoExec"].forEach((id) => {
+      $(id).addEventListener("change", () => {
+        if (state.data && state.data.automation && state.data.automation.enabled) {
+          pushAutomationConfig(true);
+        }
+      });
+    });
+
+    setInterval(() => {
+      if (!document.hidden && state.cfg.baseUrl && state.cfg.apiToken && state.data) {
+        syncState();
+      }
+    }, 10000);
+    $("btnToggleDiag").addEventListener("click", () => {
+      state.showDiag = !state.showDiag;
+      render();
+    });
+
+    $("btnRefreshLtps").addEventListener("click", async () => {
+      try {
+        state.data = await apiCall("/api/refresh-ltps", "POST", {
+          mode: currentMode(),
+          capital: Number(state.cfg.capital || 50000),
+          max_sl: Number(state.cfg.maxSl || 400),
+          max_trades: Number(state.cfg.maxTrades || 2),
+          window_preset: state.cfg.windowPreset || "morning"
+        });
+        render();
+        showStatus(state.data.notice || "LTPs refreshed.", "info");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    });
+
+    $("btnPanicExit").addEventListener("click", async () => {
+      if (!confirm(`Square off ALL OPEN ${currentMode()} positions at market price?`)) return;
+      try {
+        state.data = await apiCall("/api/panic-exit", "POST", {
+          mode: currentMode(),
+          capital: Number(state.cfg.capital || 50000),
+          max_sl: Number(state.cfg.maxSl || 400),
+          max_trades: Number(state.cfg.maxTrades || 2),
+          window_preset: state.cfg.windowPreset || "morning"
+        });
+        render();
+        showStatus(state.data.notice || "Panic square-off completed.", "success");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    });
+
+    $("selUniversePreset").addEventListener("change", () => {
+      $("customSymbolsField").classList.toggle("hidden", $("selUniversePreset").value !== "custom");
+    });
+
+    $("btnSaveServer").addEventListener("click", async () => {
+      const clampedSl = Math.min(400, Math.max(50, Number($("inMaxSl").value || 400)));
+      const clampedTrades = Math.min(2, Math.max(1, Number($("inMaxTrades").value || 2)));
+      $("inMaxSl").value = clampedSl;
+      $("inMaxTrades").value = clampedTrades;
+      state.cfg = {
+        baseUrl: $("inBaseUrl").value.trim().replace(/\/+$/, ""),
+        apiToken: $("inApiToken").value.trim(),
+        capital: $("inCapital").value || "50000",
+        maxSl: String(clampedSl),
+        maxTrades: String(clampedTrades),
+        windowPreset: $("selWindowPreset").value || "morning",
+        universePreset: $("selUniversePreset").value || "top15",
+        customSymbols: $("inCustomSymbols").value || "",
+        trailingSlEnabled: $("chkTrailingSl").checked,
+        niftyTrendFilter: $("chkNiftyFilter").checked
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.cfg));
+      await syncState();
+      if (state.data) setTab("signals");
+    });
+
+    async function syncFnoState() {
+      try {
+        const qs = new URLSearchParams({
+          mode: currentMode(),
+          window_preset: state.cfg.windowPreset || "morning"
+        }).toString();
+        state.fnoData = await apiCall(`/api/fno/state?${qs}`);
+        renderFno();
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    }
+
+    function renderFno() {
+      const fd = state.fnoData;
+      if (!fd) return;
+      $("fnoSummaryText").textContent = `Status: ${fd.status} • Net P&L ${formatINR(fd.summary.net_pnl, true)} • Trades ${fd.summary.trades_used}/2`;
+      $("btnFnoPanic").disabled = fd.summary.open_positions_count === 0;
+      const box = $("fnoTradesList");
+      box.replaceChildren();
+      if (!fd.trades || fd.trades.length === 0) {
+        const em = document.createElement("div");
+        em.className = "empty";
+        em.textContent = `No ${currentMode()} F&O trades logged today yet.`;
+        box.appendChild(em);
+      } else {
+        fd.trades.forEach((tr) => {
+          const item = document.createElement("div");
+          item.className = "item-box";
+          const top = document.createElement("div");
+          top.className = "row between";
+          const l = document.createElement("strong");
+          l.textContent = `${tr.tradingsymbol} (${tr.qty})`;
+          const r = document.createElement("strong");
+          r.className = tr.pnl >= 0 ? "pos" : "neg";
+          r.textContent = formatINR(tr.pnl, true);
+          top.append(l, r);
+          const sub = document.createElement("div");
+          sub.className = "muted";
+          sub.textContent = `Entry ₹${tr.entry_price} • SL ₹${tr.stop_loss} • Tgt ₹${tr.target} • ${tr.status}`;
+          item.append(top, sub);
+          box.appendChild(item);
+        });
+      }
+    }
+
+    $("btnFnoSync").addEventListener("click", syncFnoState);
+    $("btnFnoAnalyze").addEventListener("click", async () => {
+      try {
+        const res = await apiCall("/api/fno/analyze", "POST", {
+          mode: currentMode(),
+          underlying: $("selFnoUnderlying").value,
+          instrument_type: $("selFnoInstrument").value
+        });
+        const tr = res.trend;
+        const b = $("fnoTrendBadge");
+        b.className = `banner show ${tr.regime === "BULLISH" ? "success" : tr.regime === "BEARISH" ? "error" : "info"}`;
+        b.textContent = `${tr.index_name} Spot: ${tr.price} | ${tr.regime} | RSI ${tr.rsi_14} -> ${tr.recommended_fno_action}`;
+        state.fnoContracts = res.contracts || [];
+        const sel = $("selFnoContract");
+        sel.replaceChildren();
+        state.fnoContracts.forEach((c) => {
+          const opt = document.createElement("option");
+          opt.value = c.tradingsymbol;
+          opt.textContent = `${c.tradingsymbol} (Lot ${c.lotsize}${c.ltp ? " • ₹" + c.ltp : ""})`;
+          sel.appendChild(opt);
+        });
+        if (state.fnoContracts[0] && state.fnoContracts[0].ltp > 0) {
+          $("inFnoEntryPx").value = state.fnoContracts[0].ltp;
+        }
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    });
+    $("selFnoContract").addEventListener("change", () => {
+      const c = state.fnoContracts.find((x) => x.tradingsymbol === $("selFnoContract").value);
+      if (c && c.ltp > 0) $("inFnoEntryPx").value = c.ltp;
+    });
+    $("btnFnoExecute").addEventListener("click", async () => {
+      const c = state.fnoContracts.find((x) => x.tradingsymbol === $("selFnoContract").value);
+      if (!c) { showStatus("Analyze Spot & load contracts first.", "error"); return; }
+      try {
+        const lots = Math.min(2, Math.max(1, Number($("inFnoLots").value || 1)));
+        state.fnoData = await apiCall("/api/fno/execute", "POST", {
+          mode: currentMode(),
+          tradingsymbol: c.tradingsymbol,
+          token: String(c.token),
+          qty: Number(c.lotsize) * lots,
+          entry_price: Number($("inFnoEntryPx").value || 100),
+          sl_points: Number($("inFnoSlPts").value || 15),
+          segment: $("selFnoInstrument").value === "OPTIDX" ? "NFO_OPTIONS" : "NFO_FUTURES",
+          window_preset: state.cfg.windowPreset || "morning",
+          risk_ack: $("chkFnoAck").checked
+        });
+        renderFno();
+        showStatus(state.fnoData.notice || "F&O trade executed.", "success");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    });
+    $("btnFnoPanic").addEventListener("click", async () => {
+      if (!confirm(`Square off ALL OPEN ${currentMode()} F&O positions?`)) return;
+      try {
+        state.fnoData = await apiCall("/api/fno/panic-exit", "POST", {
+          mode: currentMode(),
+          window_preset: state.cfg.windowPreset || "morning"
+        });
+        renderFno();
+        showStatus(state.fnoData.notice || "F&O square-off completed.", "success");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    });
+
+    $("btnConnectBroker").addEventListener("click", async () => {
+      try {
+        const res = await apiCall("/api/broker/connect", "POST", {
+          api_key: $("inApiKey").value,
+          client_id: $("inClientId").value,
+          password: $("inPassword").value,
+          totp_secret: $("inTotp").value
+        });
+        showStatus(res.message, "success");
+        await syncState();
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    });
+
+    $("btnDisconnectBroker").addEventListener("click", async () => {
+      try {
+        const res = await apiCall("/api/broker/disconnect", "POST");
+        showStatus(res.message, "info");
+        await syncState();
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    });
+
+    $("btnSaveTg").addEventListener("click", async () => {
+      try {
+        const res = await apiCall("/api/telegram/config", "POST", {
+          bot_token: $("inTgToken").value,
+          chat_id: $("inTgChat").value,
+          enabled: $("chkTgEnabled").checked
+        });
+        showStatus(res.message, "success");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    });
+
+    $("btnTestTg").addEventListener("click", async () => {
+      try {
+        const res = await apiCall("/api/telegram/test", "POST", {
+          bot_token: $("inTgToken").value,
+          chat_id: $("inTgChat").value,
+          enabled: true
+        });
+        showStatus(res.message, "success");
+      } catch (err) {
+        showStatus(err.message, "error");
+      }
+    });
+
+    // Auto-pick up one-time #token=<MOBILE_API_TOKEN> from Magic Link and strip from URL bar
+    try {
+      const hash = window.location.hash || "";
+      if (hash.includes("token=")) {
+        const hashParams = new URLSearchParams(hash.replace(/^#/, ""));
+        const hashToken = (hashParams.get("token") || "").trim();
+        if (hashToken) {
+          state.cfg.apiToken = hashToken;
+          if (!state.cfg.baseUrl && defaultOrigin) state.cfg.baseUrl = defaultOrigin;
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state.cfg));
+          history.replaceState(null, "", window.location.pathname + window.location.search);
+        }
+      }
+    } catch {}
+
+    // Hydrate Settings inputs on boot
+    $("inBaseUrl").value = state.cfg.baseUrl;
+    $("inApiToken").value = state.cfg.apiToken;
+    $("inCapital").value = state.cfg.capital;
+    $("inMaxSl").value = state.cfg.maxSl;
+    $("inMaxTrades").value = state.cfg.maxTrades;
+    $("selWindowPreset").value = state.cfg.windowPreset || "morning";
+    $("selUniversePreset").value = state.cfg.universePreset || "top15";
+    $("inCustomSymbols").value = state.cfg.customSymbols || "";
+    $("chkTrailingSl").checked = state.cfg.trailingSlEnabled !== false;
+    $("chkNiftyFilter").checked = state.cfg.niftyTrendFilter !== false;
+    $("customSymbolsField").classList.toggle("hidden", $("selUniversePreset").value !== "custom");
+
+    if (state.cfg.baseUrl && state.cfg.apiToken) {
+      syncState();
+    } else {
+      setTab("settings");
+      showStatus("Enter your MOBILE_API_TOKEN (from .env) and tap Save & Connect Server.", "info");
+    }
+  </script>
+</body>
+</html>
